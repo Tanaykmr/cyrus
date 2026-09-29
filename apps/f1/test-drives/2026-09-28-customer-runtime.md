@@ -120,3 +120,26 @@ top-level generation/policyRevision refer to the workspace assignment. Hosted
 must implement these role-specific fences and terminal receipt semantics. The
 gateway/model remain controlled fixtures; this does not claim connected hosted
 or live-provider verification, release, merge or deployment.
+
+## Review follow-up: ordinary engineering failures
+
+Independent review identified that nonzero test exits interrupted the run and
+replayed the same pending command. The corrected Docker execution envelope
+returns exit code and separate bounded stdout/stderr, preserving file edits in
+the checkpoint before another model turn. Infrastructure failures remain fatal.
+
+Validation: 36 runtime/sandbox tests passed, including real Docker initially
+failing `bun test`, persisted preceding edits, model-directed repair and passing
+rerun. Real timeout, abort and output-overflow each reject and stop the container.
+The production HTTP/runtime/Docker controlled F1 drive passed all four scenarios,
+now including failure diagnostics and repair/retest before artifact publication.
+The gateway/model are still controlled fixtures; actual hosted integration is
+separately pending and no external model/provider calls were made.
+
+Commands:
+
+```sh
+CYRUS_TEST_SANDBOX_IMAGE=sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 CYRUS_TEST_DOCKER_HOST=unix:///Users/agentops/.docker/run/docker.sock pnpm --filter cyrus-edge-worker test:run test/customer-runtime.test.ts test/customer-runtime-sandbox.test.ts
+pnpm build
+CYRUS_TEST_SANDBOX_IMAGE=sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 CYRUS_TEST_DOCKER_HOST=unix:///Users/agentops/.docker/run/docker.sock bun run apps/f1/scoped-runtime-drive.ts
+```

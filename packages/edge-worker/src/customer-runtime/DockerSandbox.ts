@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { filesSchema } from "./contract.js";
+
+const commandResultSchema = z
+	.object({
+		exitCode: z.number().int().min(0).max(255),
+		stdout: z.string(),
+		stderr: z.string(),
+	})
+	.strict();
+export type EngineeringCommandResult = z.infer<typeof commandResultSchema>;
 
 /** Trusted, operator-selected immutable image; never supplied by a run/model. */
 export interface DockerSandboxConfig {
@@ -11,7 +21,10 @@ export interface DockerSandboxConfig {
 
 export interface EngineeringSandbox {
 	start(files: Record<string, string>, signal: AbortSignal): Promise<void>;
-	execute(command: string, signal: AbortSignal): Promise<string>;
+	execute(
+		command: string,
+		signal: AbortSignal,
+	): Promise<EngineeringCommandResult>;
 	snapshot(signal: AbortSignal): Promise<Record<string, string>>;
 	stop(): Promise<void>;
 }
@@ -154,10 +167,13 @@ for (const [name, content] of Object.entries(files)) {
 		}
 	}
 
-	async execute(command: string, signal: AbortSignal): Promise<string> {
+	async execute(
+		command: string,
+		signal: AbortSignal,
+	): Promise<EngineeringCommandResult> {
 		if (!this.created) throw new Error("Engineering sandbox is not running");
 		try {
-			return await this.command(
+			const output = await this.command(
 				[
 					"exec",
 					this.name,
@@ -165,12 +181,22 @@ for (const [name, content] of Object.entries(files)) {
 					"-i",
 					"PATH=/usr/local/bin:/usr/bin:/bin",
 					"HOME=/work/home",
-					"/bin/sh",
-					"-c",
+					"/usr/local/bin/bun",
+					"-e",
+					// Docker/transport failures still reject. Only a completed shell
+					// command produces this envelope, including ordinary test failures.
+					`const {spawnSync} = require('node:child_process');
+const result = spawnSync('/bin/sh', ['-c', process.argv[1]], {
+ encoding: 'utf8', maxBuffer: 256000, timeout: 29000,
+});
+if (result.error || result.signal || result.status === null) throw Error('Isolated command interrupted or exceeded its limit');
+console.log(JSON.stringify({exitCode: result.status, stdout: result.stdout, stderr: result.stderr}));`,
+					"--",
 					command,
 				],
 				signal,
 			);
+			return commandResultSchema.parse(JSON.parse(output));
 		} catch (error) {
 			// Killing only the docker client would leave an exec process alive.
 			await this.stop();
@@ -186,8 +212,17 @@ for (const [name, content] of Object.entries(files)) {
 	}
 
 	async snapshot(signal: AbortSignal): Promise<Record<string, string>> {
-		const result = await this.execute(
-			`bun -e '
+		const result = await this.command(
+			[
+				"exec",
+				this.name,
+				"/usr/bin/env",
+				"-i",
+				"PATH=/usr/local/bin:/usr/bin:/bin",
+				"HOME=/work/home",
+				"/usr/local/bin/bun",
+				"-e",
+				`
 const fs = require("node:fs"), path = require("node:path");
 const files = Object.create(null); let bytes = 0;
 function visit(dir) {
@@ -205,7 +240,8 @@ function visit(dir) {
   } else throw Error("Non-regular artifact");
  }
 }
-visit("/work"); console.log(JSON.stringify(files));'`,
+visit("/work"); console.log(JSON.stringify(files));`,
+			],
 			signal,
 		);
 		return filesSchema.parse(JSON.parse(result));

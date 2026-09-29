@@ -90,7 +90,11 @@ function authorization(name: string): Authorization {
 				reviewId: "operator-review-1",
 				technicalBrief: "Repair addition",
 				syntheticReproduction: "sum(2, 3) must equal 5",
-				files: { "sum.js": "export const sum = (a,b) => a-b;" },
+				files: {
+					"sum.js": "export const sum = (a,b) => a-b;",
+					"sum.test.js":
+						'import {test,expect} from "bun:test"; import {sum} from "./sum.js"; test("adds",()=>expect(sum(2,3)).toBe(5));',
+				},
 			},
 		};
 	}
@@ -217,10 +221,30 @@ const model: ScopedModel = {
 					type: "operation",
 					operation: {
 						kind: "execute",
-						command: `printf 'export const sum = (a,b) => a+b;' > sum.js; bun -e 'import {sum} from "./sum.js"; if(sum(2,3)!==5) process.exit(1); console.log("test passed")'`,
+						command: "printf retained > before-failure.txt; bun test",
 					},
 				};
+			const commandResult =
+				turns < 3
+					? JSON.parse(messages.at(-1)!.content).operationResult
+					: undefined;
+			if (turns === 1) {
+				assert.equal(commandResult.exitCode, 1);
+				assert(commandResult.stderr.includes("Expected: 5"));
+			}
+			if (turns === 2) {
+				assert.equal(commandResult.exitCode, 0);
+				assert(commandResult.stderr.includes("1 pass"));
+			}
 			if (turns === 1)
+				return {
+					type: "operation",
+					operation: {
+						kind: "execute",
+						command: `printf 'export const sum = (a,b) => a+b;' > sum.js; bun test`,
+					},
+				};
+			if (turns === 2)
 				return {
 					type: "operation",
 					operation: {
@@ -294,7 +318,7 @@ try {
 		receipts.some((r) => r.endpoint === "result" && r.name === "engineering"),
 	);
 	console.log(
-		"PASS scoped launch, delegation, isolated edit/test, artifact, progress/result",
+		"PASS scoped launch, delegation, failing-test diagnostics, repair/retest, artifact, progress/result",
 	);
 	for (const name of ["worker", "other-customer", "other-workspace"]) {
 		assert.equal((await post("runs", name)).status, 202);

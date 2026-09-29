@@ -132,7 +132,14 @@ scope without replacing the active execution owner. Every operation endpoint
 must recheck the owner/current generation/revision/pause/lease in the same
 transaction as its action claim. `execute` only mutates an offline sandbox and
 can be replayed from the preceding file checkpoint; external operations must be
-deduplicated/reconciled by hosted. A lost result acknowledgement resends the
+deduplicated/reconciled by hosted. Completed engineering commands return
+`{exitCode, stdout, stderr}`, including nonzero exits such as failing tests.
+Runtime checkpoints their file edits and diagnostics before the next model turn,
+so the agent can inspect, repair and retest. Command output is bounded (256 KB
+per captured stream and a 1 MB transport envelope). Timeout (29-second command /
+30-second transport), abort, output overflow, invalid envelope, Docker or
+snapshot failure stops execution; these are not ordinary command results.
+A lost result acknowledgement resends the
 persisted result without another model turn.
 
 Revocation is checked before each model turn, tool and callback and polled every
@@ -207,3 +214,36 @@ revocation with deterministic model/gateway fixtures. These fixtures are confine
 to tests/F1 and are not selectable in the production CLI. They do not establish
 live hosted/provider integration; that remains a separate CYHOST-1321 acceptance
 gate against the agreed contract and exact runtime head.
+
+
+## Rollout and rollback (operator actions, not authorized by this PR)
+
+1. Install additive hosted gateway/storage migrations with the scoped feature
+   disabled. Missing/404 discovery, unknown contract, `available: false`, or any
+   required capability missing/false must reject dispatch. Do not infer support
+   from the npm version or retry scoped work through `cyrus start`, CLI RPC,
+   chat, webhook, native runners or existing unscoped sessions.
+2. Install the complete exact-head test package bundle into a new isolated prefix;
+   no registry publication is needed. Configure a separate private service user,
+   checkpoint store, HTTPS gateway and reviewed immutable local Docker image.
+   Start the scoped service and require contract v1, `authenticatedScope`,
+   `scopedResume`, `engineering`, `leaseRenewal`, `resultReconciliation`,
+   `nativeTools: false`, `sharedMemory: false` and `available: true`.
+3. Keep production dispatch disabled while testing actual hosted gateway → scoped
+   runtime → isolated engineering → durable artifact/result receipts → sponsoring
+   coordinators. Prove same-owner renewal, active-owner takeover denial,
+   terminal result-only recovery, immutable idempotency across execution IDs,
+   assignment independence, cross-customer/workspace isolation and worker write
+   denial. Controlled F1 gateway evidence alone does not satisfy this gate.
+4. Enable only through an explicit operator decision after matching exact runtime,
+   hosted and image identities and verifying the full joint gate. This PR does
+   not authorize that decision, deployment, publication or provider writes.
+5. Roll back by disabling scoped dispatch first, fencing/revoking active owners,
+   stopping scoped services and reaping their offline containers. Preserve private
+   checkpoints and immutable hosted receipts for reconciliation; do not delete
+   additive storage or repurpose sessions. Restore a previous scoped build only
+   if it advertises every required capability; otherwise remain unavailable.
+   Reconcile uncertain publications before any retry. Legacy fallback is forbidden.
+
+No minimum published `cyrus-ai` version exists for this feature. A locally stamped
+`-cypack1546.*` test bundle is an unpublished build identity, not a release version.

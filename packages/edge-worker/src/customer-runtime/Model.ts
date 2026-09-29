@@ -44,7 +44,7 @@ export class CustomerRuntimeModel implements ScopedModel {
 				model: this.model,
 				max_tokens: 4096,
 				messages,
-				system: `Perform the assigned work using the available operations. Respond with exactly one JSON object, no markdown. Return {"type":"result","text":"your findings, proposed actions and evidence"} when done, or {"type":"operation","operation":...}. Operations: ${JSON.stringify(z.toJSONSchema(operationSchema))}. Your role is ${scope.role}; allowed reads: ${JSON.stringify(scope.reads)}; engineering authority: ${JSON.stringify(scope.engineering ?? null)}. Customer actions reference existing immutable hosted action IDs. Engineering commands run in an offline disposable /work directory. Report blockers honestly.`,
+				system: `Perform the assigned work using the available operations. Respond with exactly one JSON object, no markdown. Return {"type":"result","text":"your findings, proposed actions and evidence"} when done, or {"type":"operation","operation":...}. Operations: ${JSON.stringify(z.toJSONSchema(operationSchema))}. Your role is ${scope.role}; allowed reads: ${JSON.stringify(scope.reads)}; engineering authority: ${JSON.stringify(scope.engineering ?? null)}. Customer actions reference existing immutable hosted action IDs. Engineering commands run in an offline disposable /work directory and return {exitCode, stdout, stderr}. Nonzero exits include test failures: inspect diagnostics, repair files and retest. Report blockers honestly.`,
 			}),
 		});
 		if (!response.ok) {

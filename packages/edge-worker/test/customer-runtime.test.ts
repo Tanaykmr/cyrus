@@ -556,7 +556,7 @@ describe("authenticated customer runtime", () => {
 			model: { next },
 			sandbox: () => ({
 				start: async () => {},
-				execute: async () => "",
+				execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
 				stop: async () => {},
 				snapshot: async () => ({ "file.txt": `snapshot-${++snapshots}` }),
 			}),
@@ -662,7 +662,7 @@ describe("authenticated customer runtime", () => {
 		const sandbox = vi.fn(() => ({
 			start: async () => {},
 			stop: async () => {},
-			execute: async () => "",
+			execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
 			snapshot: async () => ({}),
 		}));
 		const runtime = new ScopedRuntime({
@@ -751,7 +751,7 @@ describe("authenticated customer runtime", () => {
 			sandbox: () => ({
 				start: async () => {},
 				stop: async () => {},
-				execute: async () => "",
+				execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
 				snapshot: async () => ({ "fix.js": "technical code" }),
 			}),
 		});
