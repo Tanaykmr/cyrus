@@ -248,9 +248,14 @@ node /absolute/runtime-handoff/build-local-artifact.mjs \
 bash install.sh /absolute/new-disposable-prefix
 ```
 
-Required preinstalled immutable Linux arm64 Docker image:
+Historical local Docker identity (the local execution used Linux arm64):
 `sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4`
-(`oven/bun:1.3.14`, also its recorded registry digest). No image was pulled. It
+(`oven/bun:1.3.14`, recorded by the local daemon). This digest identifies a
+multi-platform OCI index; it must not be described as an arm64-only image or
+assumed to be the amd64 local config ID. See
+[CI artifact/image bootstrap](../../../docs/customer-runtime-ci-artifact.md)
+for pinned platform manifests and local image verification. No image was pulled
+during the historical runtime drive. The reviewed image
 provides `/usr/bin/env`, `/bin/sh` and `/usr/local/bin/bun`; operator review must
 ensure no secrets or declared volumes. Test socket:
 `unix:///Users/agentops/.docker/run/docker.sock`; binary `/usr/local/bin/docker`.
