@@ -130,6 +130,9 @@ after result commit/ACK loss; no model reopening or renewed provider rights.
 
 Only `https://<same configured hosted origin>/mcp`, never `/api/mcp`. Real MCP SDK
 Streamable HTTP performs initialize, initialized notification, tools/list, tools/call.
+Responses are JSON-only and buffered with a 2 MB/20s bound before SDK consumption.
+Optional streaming GET405 and notification-body cancellation cannot leave an unhandled
+network-stream rejection; oversized, aborted and non-JSON streaming responses fail closed.
 Authorization is the short-lived scoped Bearer on **every** HTTP request; session ID
 is protocol state, never authorization. No OAuth/browser login, global MCP config,
 provider token, native fallback or model-selected endpoint. Renewal rotates the token

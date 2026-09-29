@@ -224,6 +224,8 @@ export async function runAutomationDrive() {
 		};
 	});
 	app.all("/mcp", async (request, reply) => {
+		if (request.method === "GET")
+			return reply.code(405).send({ error: "Streaming unavailable" });
 		const token = request.headers.authorization?.replace(/^Bearer /, "");
 		const grant = grants.get(token);
 		if (

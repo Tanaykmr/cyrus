@@ -95,17 +95,32 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 					]),
 				});
 				if (!response.body) return response;
+				// This contract uses JSON responses, not a background SSE stream. Buffer
+				// bounded bytes before handing the response to the SDK: cancelling a
+				// transformed undici stream can otherwise reject outside the SDK request.
+				const reader = response.body.getReader();
+				const chunks: Uint8Array[] = [];
 				let bytes = 0;
-				const body = response.body.pipeThrough(
-					new TransformStream<Uint8Array, Uint8Array>({
-						transform(chunk, controller) {
-							bytes += chunk.byteLength;
-							if (bytes > 2_000_000)
-								throw new Error("Scoped MCP response limit exceeded");
-							controller.enqueue(chunk);
-						},
-					}),
-				);
+				try {
+					if (
+						response.headers.get("content-type")?.includes("text/event-stream")
+					)
+						throw new Error("Scoped MCP requires JSON responses");
+					for (;;) {
+						const part = await reader.read();
+						if (part.done) break;
+						bytes += part.value.byteLength;
+						if (bytes > 2_000_000)
+							throw new Error("Scoped MCP response limit exceeded");
+						chunks.push(part.value);
+					}
+				} catch (error) {
+					await reader.cancel(error).catch(() => {});
+					throw error;
+				} finally {
+					reader.releaseLock();
+				}
+				const body = Buffer.concat(chunks);
 				return new Response(body, {
 					status: response.status,
 					statusText: response.statusText,

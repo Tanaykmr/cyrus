@@ -63,6 +63,10 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 	let currentToken = credential.token;
 	let revoked = false,
 		loseAck = false;
+	let oversizedRead = false,
+		slowRead = false;
+	const readStarted = gate(),
+		readRelease = gate();
 	const initialized = gate(),
 		initializeRelease = gate(),
 		writing = gate(),
@@ -81,6 +85,9 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 		calls = 0;
 	const app = Fastify();
 	app.all("/mcp", async (request, reply) => {
+		// Stateless hosted JSON transport rejects the SDK optional SSE request.
+		if (request.method === "GET")
+			return reply.code(405).send({ error: "Streaming unavailable" });
 		const token = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
 		if (revoked || token !== currentToken)
 			return reply.code(401).send({ error: "Denied" });
@@ -125,6 +132,15 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 				{ inputSchema: z.object({}).strict() },
 				async () => {
 					calls++;
+					if (slowRead) {
+						readStarted.release();
+						await readRelease.promise;
+					}
+					if (oversizedRead)
+						return {
+							...result(),
+							content: [{ type: "text" as const, text: "x".repeat(2_000_001) }],
+						};
 					return result();
 				},
 			);
@@ -242,6 +258,28 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 		await rotate("fourth-fixture-token-not-a-real-secret");
 		await client.call(uncertain, "uncertain-write", controller.signal);
 		expect(commits).toBe(2);
+		oversizedRead = true;
+		await expect(
+			client.call(
+				{ name: "get_issue", arguments: {} },
+				"oversized",
+				controller.signal,
+			),
+		).rejects.toThrow("interrupted");
+		oversizedRead = false;
+		slowRead = true;
+		const stopRead = new AbortController();
+		const interrupted = client.call(
+			{ name: "get_issue", arguments: {} },
+			"abort",
+			stopRead.signal,
+		);
+		const interruption = expect(interrupted).rejects.toThrow("interrupted");
+		await readStarted.promise;
+		stopRead.abort();
+		await interruption;
+		readRelease.release();
+		slowRead = false;
 		const before = calls;
 		revoked = true;
 		await expect(
@@ -255,6 +293,7 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 	} finally {
 		initializeRelease.release();
 		writeRelease.release();
+		readRelease.release();
 		controller.abort();
 		await client.close();
 		for (const session of sessions.values()) await session.server.close();
