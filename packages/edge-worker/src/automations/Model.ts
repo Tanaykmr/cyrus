@@ -69,6 +69,10 @@ export class ConfiguredAutomationMessagesModel implements AutomationModel {
 				"Configured model is incompatible with automation authority",
 			);
 		}
+		const permitted = permittedToolNames(authority);
+		const schemas = toolCallSchema.options
+			.filter((schema) => permitted.includes(schema.shape.name.value))
+			.map((schema) => z.toJSONSchema(schema));
 		const response = await fetch("https://api.anthropic.com/v1/messages", {
 			method: "POST",
 			redirect: "error",
@@ -82,7 +86,7 @@ export class ConfiguredAutomationMessagesModel implements AutomationModel {
 				model: config.model,
 				max_tokens: 4096,
 				messages,
-				system: `Execute the assigned automation. Return only JSON: {"type":"result","text":"findings"} or {"type":"tool","call":...}. Tools follow the scoped MCP call schema ${JSON.stringify(z.toJSONSchema(toolCallSchema))}. Available names: ${JSON.stringify(permittedToolNames(authority))}. The connection is bound to one resource. Role: ${authority.definition.role}. The server enforces write approval and exact payload. Report limitations honestly.`,
+				system: `Execute the assigned automation. Return only JSON: {"type":"result","text":"findings"} or {"type":"tool","call":...}. Tools follow the scoped MCP call schema ${JSON.stringify(schemas.length ? { oneOf: schemas } : false)}. Available names: ${JSON.stringify(permitted)}. The connection is bound to one resource. Role: ${authority.definition.role}. The server enforces write approval and exact payload. Delegation tracking only links a server-admitted child to the already-bound ticket or creates a direct child; it does not create or assign a provider ticket. Report limitations honestly.`,
 			}),
 		});
 		if (!response.ok) {

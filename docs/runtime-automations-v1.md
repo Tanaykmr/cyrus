@@ -161,8 +161,9 @@ resource,permissions}`. `id` is stable per occurrence and equals `mcp.grantId` a
 Only the token hash/expiry rotates; a grant identity change during renewal is denied.
 Resource is `{provider:"linear",teamId,issueId}` or
 `{provider:"slack",channelId,threadTs}`. First slice supports 0/1 bound resource;
-multi-resource references are not implemented/advertised. Permissions read/write do
-not bypass coordinator role or Hosted approval. Hosted renews only current ownership,
+multi-resource references are not implemented/advertised. Permissions read/write/delegate do
+not bypass coordinator role or Hosted approval. The delegate permission is returned only
+when both delegation and session-delivery negotiation headers are present. Hosted renews only current ownership,
 revision, policy/account state. Changing authority requires a new definition revision.
 
 POST `/api/automations/v1/progress` carries `{contractVersion:1,instanceId,
@@ -197,6 +198,29 @@ Read limit is 1..100, cursor bounded 2000 chars, text 1..10000 chars. All object
 No workspace/customer/account/connection/channel/thread/issue/role/run/grant/action
 or resource-ref argument. Search/list, aliases, HTTP/shell and absent tools deny.
 Future multiple-resource support needs explicit reviewed session-bound opaque references.
+
+The additive delegation contract (Hosted ACK 2a712269, CYPACK ACK 4c0d3718) is
+`delegate_investigation({instruction,tracking})`. Instruction is 1..10000 characters;
+tracking is required and exactly `direct` or `assigned_ticket`. No parent, role,
+resource, issue, approval or operation identity may be supplied by the model.
+Only a coordinator with both read and delegate permission discovers/calls it.
+Workers cannot receive delegation admission, and child grants remain read-only.
+Runtime advertises `delegation:true` only with durable session delivery configured
+and sends `X-Cyrus-Delegation:1` alongside `X-Cyrus-Session-Delivery:1` on admission
+and renewal. Older runtimes receive no delegate permission; unknown tools/permissions
+still reject rather than falling back.
+
+Hosted resolves the connection-bound parent/resource, commits the child assignment
+and outbox before acknowledging, and rechecks the original credential after metadata
+lookup. `direct` requires no Linear session/issue; `assigned_ticket` associates the
+already-bound authorized Linear issue. This tool does not create or assign a provider
+ticket; those provider mutations remain separately authorized work. Children execute
+through the same registered definition/occurrence/session lifecycle. Hosted owns child
+result routing back into a subsequent parent occurrence. Repeated identical delegation
+payloads within an occurrence, including after lost ACK or native reconnect, retain one
+supervisor operation identity. Different payloads get different identities. Delegation
+results use the existing scoped structuredContent envelope, with fixed authority
+metadata validated and removed before model exposure.
 
 Supervisor attaches `_meta:{idempotencyKey}` to tools/call. Hosted owns approval/action
 selection and exact approved payload comparison. Worker writes deny regardless of token

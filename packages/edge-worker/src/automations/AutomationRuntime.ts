@@ -94,6 +94,7 @@ export class AutomationRuntime {
 			capabilities: {
 				automations: true,
 				sessionActivities: !!this.options.sessions,
+				delegation: !!this.options.sessions,
 				scheduledTicks: true,
 				eventInputs: true,
 				harnessStreaming: false,
@@ -210,6 +211,17 @@ export class AutomationRuntime {
 			),
 		);
 		const next = admission.authority;
+		if (
+			next.definition.grants.some((grant) =>
+				grant.permissions.includes("delegate"),
+			) &&
+			(!this.options.sessions ||
+				!admission.sessionDelivery ||
+				next.definition.role !== "coordinator")
+		)
+			throw new Error(
+				"Delegation requires coordinator authority and durable session delivery",
+			);
 		const child = next.definition.session;
 		if (
 			child &&
@@ -222,7 +234,7 @@ export class AutomationRuntime {
 				child.scopeRef !== next.definition.scopeRef ||
 				child.role !== next.definition.role ||
 				next.definition.grants.some((grant) =>
-					grant.permissions.includes("write"),
+					grant.permissions.some((permission) => permission !== "read"),
 				))
 		)
 			throw new Error("Child assignment scope mismatch");
@@ -464,7 +476,9 @@ export class AutomationRuntime {
 					// occurrence, including native reconnect/new call IDs.
 					const position =
 						step.type === "tool" &&
-						["reply", "add_comment"].includes(step.call.name)
+						["reply", "add_comment", "delegate_investigation"].includes(
+							step.call.name,
+						)
 							? "write"
 							: state.sequence;
 					state.pending = { key: digest([key, position, step]), step };

@@ -136,7 +136,7 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 			});
 			if (
 				list.nextCursor ||
-				list.tools.length > 2 ||
+				list.tools.length > permittedToolNames(this.authority()).length ||
 				list.tools.some(
 					(tool) => !permittedToolNames(this.authority()).includes(tool.name),
 				)

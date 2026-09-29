@@ -19,6 +19,7 @@ import {
 	checkpointKey,
 	definitionSchema,
 	digest,
+	permittedToolNames,
 	scopedToolResult,
 	toolCallSchema,
 } from "../src/automations/contract.js";
@@ -341,6 +342,54 @@ describe("resource-bound tools and private resume", () => {
 				arguments: { text: "wrong provider" },
 			}),
 		).toThrow();
+	});
+	it("allows only explicitly granted coordinator delegation with strict selector-free arguments", () => {
+		const a = authority();
+		const call = {
+			name: "delegate_investigation",
+			arguments: { instruction: "Investigate", tracking: "direct" },
+		};
+		expect(() => authorizeTool(a, call)).toThrow();
+		a.definition.grants[0]!.permissions.push("delegate");
+		for (const tracking of ["direct", "assigned_ticket"])
+			expect(
+				authorizeTool(a, {
+					...call,
+					arguments: { ...call.arguments, tracking },
+				}),
+			).toBe(a.definition.grants[0]);
+		for (const field of [
+			"role",
+			"parentSessionId",
+			"customerId",
+			"workspaceId",
+			"issueId",
+			"grantId",
+			"resource",
+			"idempotencyKey",
+			"linkIssue",
+		]) {
+			expect(() =>
+				authorizeTool(a, {
+					...call,
+					arguments: { ...call.arguments, [field]: "foreign" },
+				}),
+			).toThrow();
+		}
+		for (const args of [
+			{ instruction: "", tracking: "direct" },
+			{ instruction: "x".repeat(10001), tracking: "direct" },
+			{ instruction: "x" },
+			{ instruction: "x", tracking: "arbitrary" },
+		])
+			expect(() => authorizeTool(a, { ...call, arguments: args })).toThrow();
+		for (const role of ["investigator", "engineering"] as const) {
+			const worker = { ...a, definition: { ...a.definition, role } };
+			expect(permittedToolNames(worker)).not.toContain(call.name);
+			expect(() => authorizeTool(worker, call)).toThrow();
+		}
+		a.definition.grants[0]!.permissions = ["delegate"];
+		expect(() => authorizeTool(a, call)).toThrow();
 	});
 	it("rejects provider overreturn and hides fixed authority metadata in model tool results", () => {
 		const a = authority(),
@@ -901,6 +950,7 @@ it.each([
 	"role",
 	"scope",
 	"write",
+	"delegate",
 	"ticket",
 	"external",
 	"schedule",
@@ -958,7 +1008,12 @@ it.each([
 							...d,
 							grants: authority().definition.grants.map((g) => ({
 								...g,
-								permissions: kind === "write" ? ["read", "write"] : ["read"],
+								permissions:
+									kind === "write"
+										? ["read", "write"]
+										: kind === "delegate"
+											? ["read", "delegate"]
+											: ["read"],
 							})),
 						},
 						occurrenceId: occurrence.id,

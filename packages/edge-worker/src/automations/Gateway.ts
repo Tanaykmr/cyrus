@@ -48,7 +48,7 @@ export class AutomationHttpGateway implements AutomationGateway {
 					Authorization: `Bearer ${apiKey}`,
 					"X-Cyrus-Team-Id": workspaceId,
 					...(endpoint === "authorize" && this.sessionDelivery
-						? { "X-Cyrus-Session-Delivery": "1" }
+						? { "X-Cyrus-Session-Delivery": "1", "X-Cyrus-Delegation": "1" }
 						: {}),
 				},
 				body: JSON.stringify({ ...body, contractVersion: 1 }),

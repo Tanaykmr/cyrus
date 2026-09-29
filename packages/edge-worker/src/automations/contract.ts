@@ -25,9 +25,9 @@ export const grantSchema = z
 		accountId: id,
 		resource: resourceSchema,
 		permissions: z
-			.array(z.enum(["read", "write"]))
+			.array(z.enum(["read", "write", "delegate"]))
 			.min(1)
-			.max(2),
+			.max(3),
 	})
 	.strict();
 export const scheduleSchema = z
@@ -112,6 +112,17 @@ export const admissionSchema = z
 export type AutomationAdmission = z.infer<typeof admissionSchema>;
 export type McpCredential = z.infer<typeof mcpCredentialSchema>;
 export const toolCallSchema = z.discriminatedUnion("name", [
+	z
+		.object({
+			name: z.literal("delegate_investigation"),
+			arguments: z
+				.object({
+					instruction: z.string().min(1).max(10_000),
+					tracking: z.enum(["direct", "assigned_ticket"]),
+				})
+				.strict(),
+		})
+		.strict(),
 	z
 		.object({
 			name: z.literal("read_messages"),
@@ -212,6 +223,12 @@ export function permittedToolNames(authority: AutomationAuthority): string[] {
 		authority.definition.role === "coordinator"
 	)
 		names.push(grant.resource.provider === "slack" ? "reply" : "add_comment");
+	if (
+		authority.definition.role === "coordinator" &&
+		grant.permissions.includes("read") &&
+		grant.permissions.includes("delegate")
+	)
+		names.push("delegate_investigation");
 	return names;
 }
 /** One bound resource. Arguments carry no selectors, authority IDs or approval IDs. */

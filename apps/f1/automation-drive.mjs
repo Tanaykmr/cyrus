@@ -34,7 +34,6 @@ const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const {
 	StreamableHTTPServerTransport,
 } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
-const { z } = require("zod");
 const supervisorKey = "f1-supervisor-not-a-live-credential";
 const modelKey = "f1-model-not-a-live-credential";
 
@@ -59,6 +58,9 @@ export async function runAutomationDrive({
 		results = new Map(),
 		operationReceipts = new Map();
 	const activityReceipts = new Map();
+	const delegatedChildren = new Map();
+	let lostDelegationAck = false;
+	let delegationCalls = 0;
 	let lostActivityAck = false;
 	const counts = {
 		sessionDeliveries: 0,
@@ -152,7 +154,12 @@ export async function runAutomationDrive({
 				connectionId: `connected-${provider}`,
 				accountId: "installed-account",
 				resource,
-				permissions: ["read"],
+				permissions:
+					d.id.startsWith("delegate-") &&
+					request.headers["x-cyrus-delegation"] === "1" &&
+					request.headers["x-cyrus-session-delivery"] === "1"
+						? ["read", "delegate"]
+						: ["read"],
 			};
 			const authority = {
 				contractVersion: 1,
@@ -318,16 +325,33 @@ export async function runAutomationDrive({
 		assert.ok(!text.includes(supervisorKey));
 		assert.ok(!text.includes('"token"'));
 		assert.ok(!text.includes('"grantId"'));
-		const replied = codexImage
-			? request.body.input.some((m) => m.type === "function_call_output")
-			: request.body.messages.some((m) => m.role === "assistant");
-		const name = (
-			codexImage
-				? request.body.tools.some((t) => t.name === "read_messages")
-				: request.body.system.includes('Available names: ["read_messages"]')
-		)
-			? "read_messages"
-			: "get_issue";
+		const tracking = text.includes("delegate-direct")
+			? "direct"
+			: text.includes("delegate-ticket")
+				? "assigned_ticket"
+				: null;
+		const outputs = codexImage
+			? request.body.input.filter((m) => m.type === "function_call_output")
+					.length
+			: request.body.messages.filter((m) => m.role === "assistant").length;
+		const replied = outputs >= (tracking ? 2 : 1);
+		const name = tracking
+			? "delegate_investigation"
+			: (
+						codexImage
+							? request.body.tools.some((t) => t.name === "read_messages")
+							: request.body.system.includes(
+									'Available names: ["read_messages"]',
+								)
+					)
+				? "read_messages"
+				: "get_issue";
+		const toolArguments = tracking
+			? {
+					instruction: "Investigate the bound source and return findings",
+					tracking,
+				}
+			: {};
 		if (codexImage) {
 			const item = replied
 				? {
@@ -346,9 +370,9 @@ export async function runAutomationDrive({
 				: {
 						type: "function_call",
 						id: "fc_fixture",
-						call_id: "call_fixture",
+						call_id: `call_fixture_${outputs}`,
 						name,
-						arguments: "{}",
+						arguments: JSON.stringify(toolArguments),
 					};
 			const response = {
 				id: "resp_fixture",
@@ -382,7 +406,7 @@ export async function runAutomationDrive({
 									type: "result",
 									text: "Verified assigned resource. No customer effect performed.",
 								}
-							: { type: "tool", call: { name, arguments: {} } },
+							: { type: "tool", call: { name, arguments: toolArguments } },
 					),
 				},
 			],
@@ -426,15 +450,9 @@ export async function runAutomationDrive({
 			});
 			session = { server, transport, grantId: grant.grantId };
 			for (const name of permittedToolNames(grant.authority)) {
-				const schema =
-					name === "read_messages"
-						? z
-								.object({
-									limit: z.number().int().min(1).max(100).optional(),
-									cursor: z.string().optional(),
-								})
-								.strict()
-						: z.object({}).strict();
+				const schema = toolCallSchema.options.find(
+					(schema) => schema.shape.name.value === name,
+				).shape.arguments;
 				server.registerTool(
 					name,
 					{ inputSchema: schema },
@@ -448,6 +466,64 @@ export async function runAutomationDrive({
 						else {
 							operationReceipts.set(key, payload);
 							counts.tools++;
+						}
+						if (name === "delegate_investigation") {
+							delegationCalls++;
+							if (!delegatedChildren.has(key)) {
+								const child = definition(
+									`admitted-child-${randomUUID()}`,
+									d.namespace,
+								);
+								child.role = "investigator";
+								child.instruction = args.instruction;
+								child.session = {
+									id: `assignment:${randomUUID()}`,
+									parentSessionId: `automation:${d.id}:${grant.authority.occurrenceId}`,
+									scopeRef: child.scopeRef,
+									role: child.role,
+									...(args.tracking === "assigned_ticket" && {
+										issueContext: {
+											trackerId: "linear",
+											issueId:
+												grant.authority.definition.grants[0].resource.issueId,
+											issueIdentifier: "F1-DELEGATED",
+										},
+									}),
+								};
+								for (const [path, body] of [
+									["definitions", { contractVersion: 1, definition: child }],
+									[
+										"occurrences",
+										{
+											contractVersion: 1,
+											automationId: child.id,
+											revision: 1,
+											eventId: key,
+											input: args.instruction,
+										},
+									],
+								]) {
+									const response = await realFetch(
+										`${runtimeOrigin}/api/automations/v1/${path}`,
+										{
+											method: "POST",
+											headers: {
+												Authorization: `Bearer ${supervisorKey}`,
+												"Content-Type": "application/json",
+											},
+											body: JSON.stringify(body),
+										},
+									);
+									assert.equal(response.status, 200);
+								}
+								delegatedChildren.set(key, child);
+							}
+							if (!lostDelegationAck) {
+								lostDelegationAck = true;
+								grant.revoked = true;
+								grant.until = 0;
+								throw new Error("Controlled lost delegation ACK");
+							}
 						}
 						const g = grant.authority.definition.grants[0];
 						const structuredContent = {
@@ -529,7 +605,8 @@ export async function runAutomationDrive({
 				image: codexImage,
 				dockerPath:
 					process.env.CYRUS_TEST_DOCKER_PATH || "/usr/local/bin/docker",
-				dockerHost: "unix:///var/run/docker.sock",
+				dockerHost:
+					process.env.CYRUS_TEST_DOCKER_HOST || "unix:///var/run/docker.sock",
 			},
 			(request, context) =>
 				broker.respond(
@@ -955,6 +1032,46 @@ export async function runAutomationDrive({
 			assert.equal(received.at(-1).item.payload.status, "complete");
 			assert.equal(received[0].item.payload.externalSessionId, undefined);
 		}
+		for (const tracking of ["direct", "ticket"]) {
+			const parent = definition(`delegate-${tracking}`, "customer-a");
+			parent.instruction = `delegate-${tracking}: investigate the bound resource`;
+			await call("definitions", { contractVersion: 1, definition: parent });
+			const before = counts.resultCommits;
+			await call("occurrences", {
+				...event,
+				automationId: parent.id,
+				eventId: parent.id,
+			});
+			await until(() => counts.resultCommits === before + 2, 25000);
+			const children = [...delegatedChildren.values()].filter((child) =>
+				child.session.parentSessionId.startsWith(`automation:${parent.id}:`),
+			);
+			assert.equal(
+				children.length,
+				1,
+				"replayed delegation creates exactly one child",
+			);
+			const child = children[0];
+			assert.equal(!!child.session.issueContext, tracking === "ticket");
+			await until(
+				() =>
+					ledger.status(child.id).occurrences[0].status === "completed" &&
+					ledger.status(parent.id).occurrences[0].status === "completed",
+			);
+			assert.equal(ledger.status(child.id).occurrences[0].status, "completed");
+			const received = [...activityReceipts.values()].filter(
+				(e) => e.item.sessionId === child.session.id,
+			);
+			assert.deepEqual(received[0].item.payload, child.session);
+			assert.equal(received.at(-1).item.payload.status, "complete");
+		}
+		assert.equal(delegatedChildren.size, 2);
+		assert.equal(
+			delegationCalls,
+			5,
+			"lost ACK plus repeated payloads reconcile the same two assignments",
+		);
+		assert.equal(lostDelegationAck, true);
 		await runtime.stop();
 		assert.equal(
 			(
@@ -999,11 +1116,17 @@ export async function runAutomationDrive({
 			target,
 			...(codexImage && { containedImage: codexImage }),
 			activityReceipts: activityReceipts.size,
+			delegation: {
+				children: delegatedChildren.size,
+				calls: delegationCalls,
+				lostAckRecovered: lostDelegationAck,
+			},
 			passed: true,
 			directory,
 			counts,
 			assertions: [
 				"instruction through registered HTTP routes",
+				"model-facing direct/ticket delegation through SDK MCP, stable payload identity across lost ACK/new attempt/repeated native calls, exactly one child per request",
 				"direct and assigned-ticket child descriptors, parent linkage and separate durable activity journals",
 				"negotiated durable normalized session activities, lost activity ACK, terminal flush before result and receipt-only reconnect",
 				"admitted Slack/Linear event idle wake, active-turn queue, duplicate/out-of-order delivery and restart retention",
