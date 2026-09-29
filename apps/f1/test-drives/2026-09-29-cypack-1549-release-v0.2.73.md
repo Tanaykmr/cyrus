@@ -2,7 +2,8 @@
 
 **Date**: 2026-09-29
 **Goal**: Validate the v0.2.73 payload's Claude SDK initialization, chat-session path, issue/session lifecycle, and activity rendering before publication.
-**Prepared commit**: `7d5da416c59878e823e0cb9b69a9ff12486c89cc`
+**Initial prepared commit**: `7d5da416c59878e823e0cb9b69a9ff12486c89cc`
+**Security follow-up commit**: `de89a343da33feec221366d2a23283c80b0eeeb1`
 **Test repositories**: `/private/tmp/cypack-1549-release-v0.2.73-mDKNhs/repo` and `/private/tmp/cypack-1549-release-v0.2.73-mDKNhs/repo-codex`
 **F1 ports**: `3600` (Claude) and `3601` (Codex)
 
@@ -31,6 +32,14 @@ The complete payload since `v0.2.72` includes runtime-bearing changes: the Claud
 - [x] Activities included elicitation, prompt, thought, action, and response entries with timestamps.
 - [x] Pagination returned two 12-activity windows from 24 total activities.
 - [x] The session stopped successfully and the server shut down gracefully.
+
+### MCP dependency security follow-up
+
+- [x] `@modelcontextprotocol/sdk@1.31.0`, `express-rate-limit@8.7.0`, and `ip-address@10.7.2` resolved without the prior MCP SDK or `ip-address` overrides.
+- [x] `pnpm audit` reported no known vulnerabilities.
+- [x] The F1 server started from the security follow-up commit and registered `/mcp/cyrus-tools` successfully through the updated SDK dependency graph.
+- [x] The MCP tools suite passed 33 tests and the config-updater suite passed 55 tests.
+- [ ] Direct MCP `initialize` cannot be exercised in current F1 CLI mode because `McpConfigService` intentionally omits a cyrus-tools context when the CLI tracker has no real Linear client; the endpoint correctly rejected the synthetic unknown context.
 
 ## Session log
 
@@ -89,12 +98,28 @@ pnpm --filter cyrus-ai exec vitest run \
 
 Results: edge-worker 845 passed / 1 skipped, core 193 passed, Claude runner 120 passed, and 59 focused release tests passed. The release tests need a 30-second local timeout on this host because their fake-registry child processes exceed Vitest's default 5-second limit; no assertion failed under the extended timeout.
 
+After the mandatory audit discovered newly published `ip-address` advisories, the direct MCP SDK dependencies were advanced to `1.31.0`, the compatible transitive graph was refreshed to `express-rate-limit@8.7.0` and `ip-address@10.7.2`, and the redundant MCP SDK and `ip-address` overrides were removed. The post-patch checks were:
+
+```bash
+pnpm audit
+pnpm --filter cyrus-config-updater test:run
+pnpm --filter cyrus-mcp-tools test:run
+CYRUS_PORT=3602 CYRUS_DEFAULT_RUNNER=codex \
+  CYRUS_REPO_PATH=/private/tmp/cypack-1549-release-v0.2.73-mDKNhs/repo-codex \
+  bun run apps/f1/server.ts
+CYRUS_PORT=3602 apps/f1/f1 ping
+CYRUS_PORT=3602 apps/f1/f1 status
+```
+
+Result: audit was clean, 88 focused tests passed, the F1 server became ready, and the cyrus-tools MCP endpoint registered successfully. A direct `initialize` request with an invented context returned the expected `Unknown cyrus-tools MCP context` error because CLI mode deliberately has no real Linear client from which to build that context.
+
 ## Limitations
 
 1. `claude auth status` reported a logged-in Max account, but live SDK turns returned `401 OAuth access token has expired`; interactive reauthentication is outside this release session. SDK initialization, tool delivery, session-ID assignment, and error activity mapping were still exercised.
 2. The Codex runner's macOS sandbox bootstrap rejected local shell startup, so its final response accurately reported that it could not read the fixture README. The issue, routing, runner, activity, response, pagination, stop, and shutdown paths completed successfully.
 3. The synthetic Slack channel intentionally does not exist in the real Slack workspace, so reaction/reply API calls returned `channel_not_found` after the local chat path ran.
 4. `f1 ping` still prints `Status: undefined` on a successful health response, the existing CLI/RPC field-name mismatch.
+5. F1 CLI mode deliberately cannot prebuild an authenticated cyrus-tools MCP context because its issue tracker is local rather than a real Linear client. Endpoint registration and the package/config integration suites passed after the MCP SDK security bump; authenticated protocol exchange remains covered by the existing non-CLI integration fixtures.
 
 ## Final retrospective
 
