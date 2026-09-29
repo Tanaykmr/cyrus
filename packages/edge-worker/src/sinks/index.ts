@@ -8,7 +8,10 @@ export type {
 	ActivityPostOptions,
 	ActivityPostResult,
 	ActivitySignal,
+	CyrusSessionDescriptor,
 	IActivitySink,
+	ICyrusSessionSink,
+	SessionActivitySink,
 } from "./IActivitySink.js";
 export { LinearActivitySink } from "./LinearActivitySink.js";
 export { NoopActivitySink } from "./NoopActivitySink.js";

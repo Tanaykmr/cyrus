@@ -35,7 +35,9 @@ import {
 import type {
 	ActivityPostOptions,
 	ActivitySignal,
-	IActivitySink,
+	CyrusSessionDescriptor,
+	ICyrusSessionSink,
+	SessionActivitySink,
 } from "./sinks/index.js";
 
 /**
@@ -68,7 +70,7 @@ export declare interface AgentSessionManager {
  */
 export class AgentSessionManager extends EventEmitter {
 	private logger: ILogger;
-	private activitySinks: Map<string, IActivitySink> = new Map(); // Per-session activity sinks
+	private activitySinks: Map<string, SessionActivitySink> = new Map(); // Per-session activity sinks
 	private sessions: Map<string, CyrusAgentSession> = new Map();
 	private entries: Map<string, CyrusAgentSessionEntry[]> = new Map(); // Stores a list of session entries per each session by its id
 	private activeTasksBySession: Map<string, string> = new Map(); // Maps session ID to active Task tool use ID
@@ -116,15 +118,82 @@ export class AgentSessionManager extends EventEmitter {
 	 * Register an activity sink for a specific session.
 	 * This associates the session with the correct issue tracker for activity posting.
 	 */
-	setActivitySink(sessionId: string, sink: IActivitySink): void {
+	setActivitySink(sessionId: string, sink: SessionActivitySink): void {
+		const binding = this.sessions.get(sessionId)?.activitySinkBinding;
+		if (
+			binding &&
+			(binding.sinkId !== sink.id || !("createCyrusSession" in sink))
+		) {
+			throw new Error("Activity sink does not match persisted session binding");
+		}
 		this.activitySinks.set(sessionId, sink);
 	}
 
 	/**
 	 * Get the activity sink for a session.
 	 */
-	private getActivitySink(sessionId: string): IActivitySink | undefined {
-		return this.activitySinks.get(sessionId);
+	private getActivitySink(sessionId: string): SessionActivitySink | undefined {
+		const sink = this.activitySinks.get(sessionId);
+		const binding = this.sessions.get(sessionId)?.activitySinkBinding;
+		if (
+			binding &&
+			(!sink || binding.sinkId !== sink.id || !("createCyrusSession" in sink))
+		) {
+			return undefined;
+		}
+		return sink;
+	}
+
+	private activityDestination(session: CyrusAgentSession): string | undefined {
+		return session.activitySinkBinding?.sessionId ?? session.externalSessionId;
+	}
+
+	/**
+	 * Track an already-admitted Cyrus session. This is supervisor plumbing, not a
+	 * launch/delegation authorization API. The scope-bound sink must persist and
+	 * authorize creation before the session becomes available to a runner.
+	 */
+	async createOwnedSession(
+		descriptor: CyrusSessionDescriptor,
+		workspace: Workspace,
+		sink: ICyrusSessionSink,
+		repositories: RepositoryContext[] = [],
+	): Promise<CyrusAgentSession> {
+		// Keep admission and local identity tied to the same immutable snapshot.
+		descriptor = structuredClone(descriptor);
+		if (!descriptor.id || this.sessions.has(descriptor.id)) {
+			throw new Error("Session identity is missing or already tracked");
+		}
+		if (descriptor.parentSessionId) {
+			const parent = this.sessions.get(descriptor.parentSessionId);
+			if (!parent || this.getActivitySink(parent.id)?.id !== sink.id) {
+				throw new Error("Parent session must be tracked by the same sink");
+			}
+		}
+		await sink.createCyrusSession(descriptor);
+		// A concurrent creation must not replace a tracked session or its runner.
+		if (this.sessions.has(descriptor.id)) {
+			throw new Error("Session identity is already tracked");
+		}
+		const session: CyrusAgentSession = {
+			id: descriptor.id,
+			parentSessionId: descriptor.parentSessionId,
+			activitySinkBinding: { sinkId: sink.id, sessionId: descriptor.id },
+			externalSessionId: descriptor.externalSessionId,
+			issueContext: descriptor.issueContext,
+			issueId: descriptor.issueContext?.issueId,
+			type: AgentSessionType.CommentThread,
+			context: AgentSessionType.CommentThread,
+			status: AgentSessionStatus.Active,
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+			workspace,
+			repositories,
+		};
+		this.sessions.set(session.id, session);
+		this.entries.set(session.id, []);
+		this.setActivitySink(session.id, sink);
+		return session;
 	}
 
 	/**
@@ -416,7 +485,8 @@ export class AgentSessionManager extends EventEmitter {
 		// messages in, ending in another result. Resuming the parent now would
 		// hand it a non-final result and resume it again later, so defer the
 		// callback to the result that actually ends the session.
-		const parentSessionId = this.getParentSessionId?.(sessionId);
+		const parentSessionId =
+			session.parentSessionId ?? this.getParentSessionId?.(sessionId);
 		if (parentSessionId && this.resumeParentSession) {
 			if (pendingWork) {
 				log.info(
@@ -466,11 +536,13 @@ export class AgentSessionManager extends EventEmitter {
 		resultMessage: SDKResultMessage,
 	): Promise<void> {
 		const log = this.sessionLog(sessionId);
-		if (!this.getParentSessionId || !this.resumeParentSession) {
+		if (!this.resumeParentSession) {
 			return;
 		}
 
-		const parentAgentSessionId = this.getParentSessionId(sessionId);
+		const parentAgentSessionId =
+			this.sessions.get(sessionId)?.parentSessionId ??
+			this.getParentSessionId?.(sessionId);
 
 		if (!parentAgentSessionId) {
 			log.error(`No parent session ID found for child session`);
@@ -1301,7 +1373,8 @@ export class AgentSessionManager extends EventEmitter {
 			}
 
 			// Ensure we have an external session ID for activity posting
-			if (!session.externalSessionId) {
+			const destination = this.activityDestination(session);
+			if (!destination) {
 				log.debug(
 					`Skipping activity sync - no external session ID (platform: ${session.issueContext?.trackerId || "unknown"})`,
 				);
@@ -1322,7 +1395,7 @@ export class AgentSessionManager extends EventEmitter {
 			}
 
 			const result = await activitySink.postActivity(
-				session.externalSessionId,
+				destination,
 				content,
 				options,
 			);
@@ -1523,7 +1596,8 @@ export class AgentSessionManager extends EventEmitter {
 		const log = this.sessionLog(sessionId);
 		const session = this.sessions.get(sessionId);
 
-		if (!session?.externalSessionId) {
+		const destination = session && this.activityDestination(session);
+		if (!destination) {
 			log.debug(
 				`Skipping ${label} - no external session ID (platform: ${session?.issueContext?.trackerId || "unknown"})`,
 			);
@@ -1551,7 +1625,7 @@ export class AgentSessionManager extends EventEmitter {
 			}
 
 			const result = await activitySink.postActivity(
-				session.externalSessionId,
+				destination,
 				input.content,
 				options,
 			);

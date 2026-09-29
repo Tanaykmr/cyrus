@@ -66,7 +66,10 @@ export type {
 	ActivityPostOptions,
 	ActivityPostResult,
 	ActivitySignal,
+	CyrusSessionDescriptor,
 	IActivitySink,
+	ICyrusSessionSink,
+	SessionActivitySink,
 } from "./sinks/index.js";
 export { LinearActivitySink } from "./sinks/index.js";
 export type { PromptType } from "./ToolPermissionResolver.js";

@@ -9,7 +9,10 @@ export const DEFAULT_CYRUS_APP_URL = "https://app.atcyrus.com";
  * @returns The Cyrus app base URL (e.g., "https://app.atcyrus.com")
  */
 export function getCyrusAppUrl(): string {
-	return process.env.CYRUS_APP_URL || DEFAULT_CYRUS_APP_URL;
+	return (process.env.CYRUS_APP_URL || DEFAULT_CYRUS_APP_URL).replace(
+		/\/+$/,
+		"",
+	);
 }
 
 /**
@@ -57,14 +60,17 @@ export class ConfigApiClient {
 			}
 
 			// Call config API with auth key
-			const url = `${ConfigApiClient.getConfigApiUrl()}?auth_key=${encodeURIComponent(authKey)}`;
-			const response = await fetch(url);
+			const response = await fetch(ConfigApiClient.getConfigApiUrl(), {
+				headers: { Authorization: `Bearer ${authKey}` },
+				redirect: "error",
+				signal: AbortSignal.timeout(15_000),
+			});
 
 			if (!response.ok) {
-				const errorText = await response.text();
+				await response.body?.cancel();
 				return {
 					success: false,
-					error: `Config API request failed: ${response.status} ${response.statusText} - ${errorText}`,
+					error: `Config API request failed (${response.status})`,
 				};
 			}
 
@@ -74,7 +80,7 @@ export class ConfigApiClient {
 			if (!data.success || !data.config) {
 				return {
 					success: false,
-					error: data.error || "Invalid response format from config API",
+					error: "Invalid response format from config API",
 				};
 			}
 
@@ -87,16 +93,11 @@ export class ConfigApiClient {
 			}
 
 			return data;
-		} catch (error) {
-			if (error instanceof Error) {
-				return {
-					success: false,
-					error: `Failed to retrieve config: ${error.message}`,
-				};
-			}
+		} catch {
 			return {
 				success: false,
-				error: "Failed to retrieve config: Unknown error",
+				error:
+					"Failed to retrieve config; verify the configured origin and connection",
 			};
 		}
 	}
