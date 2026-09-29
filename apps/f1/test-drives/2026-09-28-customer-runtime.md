@@ -75,3 +75,48 @@ Hosted must implement current-owner lease/CAS, action serialization and
 idempotency/reconciliation, scoped provider reads, reviewed repository snapshots
 and real engineering publication. The PR remains a draft pending that contract
 and integration gate. No minimum published `cyrus-ai` version exists yet.
+
+## Orchestrator follow-up: lease renewal and completed-run recovery
+
+Tested implementation commit: `2645f787506238aed2cc2411ccc32e83fc5a380c`
+Date: 2026-09-28, approximately 19:22 America/Vancouver.
+The same reproduction command above passes against this commit. The original
+drive and its evidence remain recorded above.
+
+The expanded controlled gateway now enforces execution-owner fencing. Added
+HTTP/lifecycle assertions pass:
+
+- A resume using a new execution ID is denied while the existing owner is live.
+- Explicit interrupt expires/fences that owner; runtime accepts an expired lease
+  in the authenticated interrupt response and a new resume owner can proceed.
+- A 400ms model turn survives its initial 150ms lease through authenticated
+  renewals. The runtime no longer freezes the first lease deadline.
+- A simulated lost result acknowledgement leaves a completed hosted run whose
+  ordinary operation/progress paths reject further work. Resume uses the new
+  `result` authorization phase and replays the exact persisted result/key with
+  a new execution ID, without another model turn or progress callback.
+- A subsequent locally completed resume returns completed without replaying
+  either the operation or result callback.
+- Missing-checkpoint admission is interrupted before admitting a new owner;
+  this demonstrates that local rejection does not bypass hosted lease fencing.
+
+Additional output:
+
+```text
+PASS renewable lease, fenced resume takeover, terminal receipt reconciliation and completed local resume
+```
+
+70 focused tests pass (31 runtime authorization/recovery tests plus real Docker
+and existing chat/config/Zulip/resume tests). New tests additionally verify hard
+token expiration despite lease renewal, shortened leases, rejection of late
+renewals, takeover only after expiration/interruption, engineering terminal
+receipt recovery with no sandbox available, and assignment generation/revision
+fencing independent of sponsoring-customer withdrawal. Cross-customer/workspace
+checkpoint tests and the complete entry-point inventory remain in place.
+Build, typecheck and changed-file Biome pass. No hosted files were changed.
+
+Shared engineering uses stable sponsoring `customerId` with zero customer reads;
+top-level generation/policyRevision refer to the workspace assignment. Hosted
+must implement these role-specific fences and terminal receipt semantics. The
+gateway/model remain controlled fixtures; this does not claim connected hosted
+or live-provider verification, release, merge or deployment.
