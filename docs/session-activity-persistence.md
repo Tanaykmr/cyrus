@@ -6,8 +6,8 @@ current-authority checks, contained MCP connections or terminal receipt recovery
 Hosted accepted the delivery path/envelope in coordination comment
 `d15d1384-5393-4440-ada6-2217d57c63c8`. Shared exported types and strict validators
 now live in `packages/edge-worker/src/sinks/session-delivery.ts`. There is no
-enabled hosted activity transport in this runtime milestone; the bounded signal
-metadata subset below still awaits explicit confirmation.
+enabled hosted activity transport in this runtime milestone. The bounded signal
+metadata subset below was accepted in comment `3f8623c3-609a-4199-9e9e-31f549be1b47`.
 
 ## Identity and delegation
 
@@ -90,7 +90,7 @@ undefined, nonfinite numbers and non-JSON values. Lifecycle payload is
 digest substitutes for hosted computation. Items are bounded to128KiB and display
 text fields to32768 characters.
 
-The initial metadata subset proposed for confirmation accepts only
+The accepted initial metadata subset accepts only
 `signal:"select",signalMetadata:{options:[{value:string}]}` (1–20 choices,
 maximum1000 characters each). auth/stop/continue carry no metadata; credential
 URLs and other arbitrary metadata are rejected. Existing legacy Linear sinks are
@@ -112,6 +112,49 @@ activity and is not promoted into permanent narrative history. Signals keep
 the existing auth/select/stop/continue vocabulary. A lifecycle update must not
 pretend to be an assistant thought. Parent results/findings/PR references use
 the same activity/session relationship and require durable idempotent handoff.
+
+## Runtime adapter and recovery boundary
+
+`SessionActivityJournal` persists redacted normalized items in a private SQLite
+file selected by the authenticated operating workspace and namespace. Its
+transactions allocate contiguous per-session sequences and remove pending items
+only after a matching digest/sequence acknowledgement. Parent creation must be
+acknowledged before local child creation. An unacknowledged session cannot emit
+activities. A denied session does not prevent delivery for another admitted
+session; order remains strict within each session. The journal holds at most512
+session identities,1024 pending items and16MiB; exhaustion fails closed. Automatic
+retention/compaction policy remains to be agreed before long-running rollout.
+
+`DurableCyrusSessionSink` redacts whole affected display fields before storage,
+using recognizable credential patterns and supervisor-supplied current secret
+values held only in memory. It never changes persisted retry payloads. The
+`HttpSessionDeliveryTransport` uses fixed HTTPS, current supervisor credentials,
+bounded responses/timeouts and redirect refusal. Recreating a known session
+still performs current-authority remote admission; a local receipt alone cannot
+authorize reconnection. Reconnect explicitly flushes the queue through the
+supervisor lifecycle; the journal is not a scheduler.
+
+AgentSessionManager emits shared lifecycle status/native identity through the
+owned sink. Local durable-storage or schema failures stop the owned runner;
+network failures retain already-durable items. Owned state serialization requires
+the explicit sink ID, omits raw SDK/tool caches and is excluded from the legacy
+platform-wide state snapshot. Restoring another sink's state is rejected and
+the sink must be rebound. Legacy Linear-backed state handling remains compatible.
+
+Owned children never call the legacy parent-resume callback: that callback may
+launch an unscoped runner. Child response plus terminal lifecycle and the admitted
+parent relationship provide the persisted result; hosted must wake the parent via
+its authorized binding/outbox into the same generic runtime occurrence ledger.
+That parent wakeup and automatic reconnect flush are not yet wired here. Likewise,
+native harness stream re-emission needs a stable source-event cursor/dedup policy;
+transport retry idempotency alone does not prove native-session resume coverage.
+
+The production classes are tested together over actual HTTP with a controlled
+receiver and SQLite, including normalizer replay, missing ACK, changed attempt,
+revocation, bad ACK, separate customer/workspace journals, redaction and both
+optional-ticket shapes. No live Codex process or hosted SQL/UI is claimed by
+those tests. Registered execution integration awaits the agreed optional
+`sessionDelivery` admission field and hosted current-authority handler.
 
 ## Acceptance still required
 

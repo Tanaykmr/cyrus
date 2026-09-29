@@ -9,6 +9,7 @@ function sink(): ICyrusSessionSink {
 	return {
 		id: "bound-workspace-and-namespace",
 		createCyrusSession: vi.fn().mockResolvedValue(undefined),
+		updateCyrusSession: vi.fn().mockResolvedValue(undefined),
 		postActivity: vi
 			.fn()
 			.mockResolvedValue({ activityId: "persisted-activity" }),
@@ -85,10 +86,12 @@ describe("Cyrus-owned session activity routing (normalizer replay, not live Code
 			}),
 			{},
 		);
-		const state = JSON.parse(JSON.stringify(manager.serializeState()));
+		const state = JSON.parse(
+			JSON.stringify(manager.serializeState(destination.id)),
+		);
 		const returnToParent = vi.fn().mockResolvedValue(undefined);
 		const restored = new AgentSessionManager(undefined, returnToParent);
-		restored.restoreState(state.sessions, state.entries);
+		restored.restoreState(state.sessions, state.entries, destination.id);
 		restored.setActivitySink("child", destination);
 		expect(restored.getSession("child")).toMatchObject({
 			id: "child",
@@ -116,12 +119,18 @@ describe("Cyrus-owned session activity routing (normalizer replay, not live Code
 			},
 			{},
 		);
-		expect(returnToParent).toHaveBeenCalledWith(
-			"parent",
-			expect.stringContaining("Investigation complete"),
-			"child",
-		);
+		expect(returnToParent).not.toHaveBeenCalled(); // Owned returns use the durable parent relationship, never a legacy runner.
 		expect(destination.createCyrusSession).toHaveBeenCalledTimes(2);
+		expect(destination.updateCyrusSession).toHaveBeenCalledWith("child", {
+			status: "active",
+			harness: { type: "codex", sessionId: "native-codex-thread" },
+		});
+		expect(destination.updateCyrusSession).toHaveBeenLastCalledWith("child", {
+			status: "complete",
+			harness: { type: "codex", sessionId: "native-codex-thread" },
+		});
+		expect(manager.serializeState()).toEqual({ sessions: {}, entries: {} });
+		expect(state.entries.child).toEqual([]);
 		expect("createAgentSession" in destination).toBe(false);
 	});
 
@@ -149,9 +158,15 @@ describe("Cyrus-owned session activity routing (normalizer replay, not live Code
 			),
 		).rejects.toThrow("Child authority denied");
 		expect(manager.getSession("child")).toBeUndefined();
-		const state = manager.serializeState();
+		const state = manager.serializeState(destination.id);
 		const restored = new AgentSessionManager();
-		restored.restoreState(state.sessions, state.entries);
+		expect(() => restored.restoreState(state.sessions, state.entries)).toThrow(
+			"checkpoint scope mismatch",
+		);
+		expect(() =>
+			restored.restoreState(state.sessions, state.entries, "another-customer"),
+		).toThrow("checkpoint scope mismatch");
+		restored.restoreState(state.sessions, state.entries, destination.id);
 		expect(() =>
 			restored.setActivitySink("parent", { ...sink(), id: "another-customer" }),
 		).toThrow("persisted session binding");
@@ -167,5 +182,25 @@ describe("Cyrus-owned session activity routing (normalizer replay, not live Code
 				destination,
 			),
 		).rejects.toThrow("Parent session");
+	});
+
+	it("stops owned execution when local durable acceptance fails without swallowing or exposing the error", async () => {
+		const manager = new AgentSessionManager();
+		const destination = sink();
+		await manager.createOwnedSession(
+			{ id: "parent", scopeRef: "scope", role: "coordinator" },
+			workspace,
+			destination,
+		);
+		const stop = vi.fn();
+		manager.addAgentRunner("parent", { stop } as unknown as CodexRunner);
+		vi.mocked(destination.postActivity).mockRejectedValue(
+			new Error("private failure details"),
+		);
+		await expect(
+			manager.createThoughtActivity("parent", "display text"),
+		).rejects.toThrow("Durable session activity could not be accepted");
+		expect(stop).toHaveBeenCalledTimes(1);
+		expect(manager.getSession("parent")?.status).toBe("error");
 	});
 });

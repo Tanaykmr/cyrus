@@ -1,4 +1,5 @@
 import type { AgentActivityContent, IssueContext } from "cyrus-core";
+import type { SessionLifecycleUpdate } from "./session-delivery.js";
 
 /**
  * String literal type for activity signals.
@@ -89,6 +90,11 @@ export interface CyrusSessionDescriptor {
 export interface ICyrusSessionSink
 	extends Pick<IActivitySink, "id" | "postActivity"> {
 	createCyrusSession(session: CyrusSessionDescriptor): Promise<void>;
+	/** Shared lifecycle/status channel, separate from assistant activity content. */
+	updateCyrusSession?(
+		sessionId: string,
+		update: SessionLifecycleUpdate,
+	): Promise<void>;
 }
 
 export type SessionActivitySink = IActivitySink | ICyrusSessionSink;
