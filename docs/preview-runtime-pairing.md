@@ -42,6 +42,25 @@ the older auth client put codes in query parameters.
    restart. Hosted `/api/config` auth-prefix logging must also be removed before
    credential-free live pairing is accepted.
 
+For a custom local port, check the feature tunnel's managed ingress independently.
+The token-based client calls `Tunnel.withToken(token)`; the local port does not
+override Cloudflare's remotely managed origin. Hosted's original tunnel setup uses
+`http://localhost:3456`. A separate preview listener on50967 can therefore be
+healthy locally while the feature hostname routes to an unrelated listener.
+Four Cloudflare connections establish connector connectivity only.
+
+The client now observes managed configuration and reports `unverified`,
+`matches-local-port` or `mismatch`, without logging raw config/credentials. This
+is a diagnostic, not authenticated route identity or model readiness. Unknown or
+unparsed configuration is not proof of routing. Hosted owns reconciliation of
+ONLY the selected feature workspace tunnel; the coordinator must then compare
+an authenticated routed response with the intended local runtime/workspace.
+Do not change the unrelated runtime or rotate tokens to correct an origin port.
+Configuration delivery and contained model readiness remain separate gates even
+after routing matches. The controlled
+[routing F1](../apps/f1/test-drives/2026-09-29-tunnel-routing.md) is not evidence
+that the live feature tunnel was reconciled.
+
 Commands below use placeholders deliberately. The coordinator selects the
 existing home and prefix after inspection, obtains the code privately and avoids
 shell tracing/history capture. Do not paste a real code into a shared command.
