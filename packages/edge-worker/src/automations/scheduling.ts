@@ -30,6 +30,7 @@ export function latestTick(
 export function instructionKey(
 	definition: AutomationRegistration,
 	eventId: string,
+	trigger: "instruction" | "event" = "instruction",
 ): string {
 	if (!eventId || eventId.length > 200)
 		throw new Error("Stable event identity required");
@@ -37,7 +38,7 @@ export function instructionKey(
 		definition.workspaceId,
 		definition.id,
 		definition.revision,
-		"instruction",
+		trigger,
 		eventId,
 	]);
 }

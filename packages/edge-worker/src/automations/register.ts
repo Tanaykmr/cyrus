@@ -51,7 +51,7 @@ export function registerAutomationRoutes(
 				return reply
 					.code(400)
 					.send({ error: "Unsupported automation request" });
-			if (!runtime.capabilities().available)
+			if (!runtime.canDrain())
 				return reply.code(409).send(runtime.capabilities());
 			void runtime.wake().catch(() => {});
 			return reply
@@ -102,6 +102,7 @@ export function registerAutomationRoutes(
 						revision: z.number().int().positive(),
 						eventId: z.string().min(1).max(200),
 						input: z.string().max(100_000),
+						trigger: z.enum(["instruction", "event"]).default("instruction"),
 					})
 					.strict()
 					.parse(request.body);
@@ -110,6 +111,7 @@ export function registerAutomationRoutes(
 					body.revision,
 					body.eventId,
 					body.input,
+					body.trigger,
 				);
 				void runtime.wake().catch(() => {});
 				return {
@@ -209,17 +211,17 @@ export function registerConfiguredAutomations(
 		),
 		readiness: () => {
 			const config = configuration();
+			const controlReason =
+				(process.env.CYRUS_TEAM_ID !== pairedWorkspace
+					? "Workspace pairing changed; restart required"
+					: null) ||
+				gatewayError ||
+				(!process.env.CYRUS_API_KEY ? "Runtime is not paired" : null);
 			return {
 				harness: config.harness,
 				model: config.model,
-				reason:
-					(process.env.CYRUS_TEAM_ID !== pairedWorkspace
-						? "Workspace pairing changed; restart required"
-						: null) ||
-					gatewayError ||
-					(!process.env.CYRUS_API_KEY
-						? "Runtime is not paired"
-						: modelReadiness(config)),
+				controlReason,
+				reason: controlReason || modelReadiness(config),
 			};
 		},
 	});

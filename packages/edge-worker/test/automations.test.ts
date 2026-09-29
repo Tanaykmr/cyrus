@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AutomationRuntime } from "../src/automations/AutomationRuntime.js";
 import { AutomationCheckpointStore } from "../src/automations/CheckpointStore.js";
 import {
 	type AutomationAuthority,
@@ -17,6 +18,7 @@ import {
 	authorizeTool,
 	checkpointKey,
 	definitionSchema,
+	digest,
 	scopedToolResult,
 	toolCallSchema,
 } from "../src/automations/contract.js";
@@ -430,4 +432,197 @@ describe("resource-bound tools and private resume", () => {
 		])
 			expect(modelReadiness({ ...good, ...patch })).not.toBeNull();
 	});
+});
+
+describe("terminal receipts survive definition and model changes", () => {
+	it.each([
+		"paused",
+		"deleted",
+		"enabled",
+	] as const)("reconciles a lost ACK after %s revision without model/tool/progress reopening", async (state) => {
+		let now = Date.now();
+		const db = await ledger(() => now);
+		const d = definition();
+		db.upsert(d);
+		const occurrence = db.enqueue(
+			d.id,
+			1,
+			"receipt-event",
+			"Immutable instruction",
+		);
+		const store = new AutomationCheckpointStore(await directory());
+		let committed = false,
+			unavailable = false,
+			modelCalls = 0,
+			progress = 0,
+			toolCalls = 0;
+		const results: Array<Record<string, unknown>> = [];
+		const options = {
+			workspaceId: () => d.workspaceId,
+			ledger: db,
+			store,
+			readiness: () => ({
+				...d.target,
+				reason: unavailable ? "Configured model unavailable" : null,
+			}),
+			model: {
+				async next() {
+					modelCalls++;
+					return { type: "result" as const, text: "Immutable result" };
+				},
+			},
+			tools: () => ({
+				async call() {
+					toolCalls++;
+					throw new Error("Receipt must not open tools");
+				},
+				async close() {},
+				async renew(operation: () => Promise<void>) {
+					await operation();
+				},
+			}),
+			gateway: {
+				async call(endpoint: string, body: Record<string, unknown>) {
+					if (endpoint === "authorize")
+						return {
+							authority: authority({
+								definition: { ...d, grants: authority().definition.grants },
+								occurrenceId: occurrence.id,
+								attemptId: String(body.attemptId),
+								fence: Number(body.fence),
+								input: occurrence.input,
+								phase: committed ? "reconcile" : "execute",
+							}),
+							mcp: {
+								token: "fixture-credential-not-a-live-secret",
+								audience: "/mcp",
+								expiresAt: new Date(Date.now() + 60000).toISOString(),
+								grantId: "bound-grant",
+							},
+						};
+					if (endpoint === "progress") {
+						progress++;
+						return {};
+					}
+					results.push(body);
+					if (!committed) {
+						committed = true;
+						db.upsert({
+							...d,
+							revision: 2,
+							state,
+							instruction: "New revision",
+						});
+						unavailable = true;
+						throw new Error("Lost result acknowledgement");
+					}
+					return {
+						contractVersion: 1,
+						acknowledged: true,
+						occurrenceId: body.occurrenceId,
+						idempotencyKey: body.idempotencyKey,
+					};
+				},
+			},
+		};
+		const first = new AutomationRuntime(options);
+		await first.wake();
+		await first.stop();
+		expect(db.status(d.id).occurrences[0]?.status).toBe("queued");
+		now += 6000;
+		const resumed = new AutomationRuntime(options);
+		expect(resumed.capabilities().available).toBe(false);
+		await resumed.wake();
+		await resumed.stop();
+		expect(db.status(d.id).occurrences[0]?.status).toBe("completed");
+		expect(results).toHaveLength(2);
+		expect(results[1]?.idempotencyKey).toBe(results[0]?.idempotencyKey);
+		expect(results[1]?.revision).toBe(1);
+		expect(results[1]?.attemptId).not.toBe(results[0]?.attemptId);
+		expect({ modelCalls, progress, toolCalls }).toEqual({
+			modelCalls: 1,
+			progress: 1,
+			toolCalls: 0,
+		});
+	});
+});
+
+it("retains admitted events in arrival order across running work/restart and scopes dedup to the automation", async () => {
+	const path = await directory();
+	let now = Date.now();
+	const db = new AutomationLedger(path, "workspace-a", () => now);
+	const a = definition({ id: "slack-events", namespace: "customer-a" });
+	const b = definition({ id: "linear-events", namespace: "customer-b" });
+	db.upsert(a);
+	db.upsert(b);
+	const active = db.enqueue(
+		a.id,
+		1,
+		"newer-source-event",
+		"Slack source time20",
+		"event",
+	);
+	const [running] = db.claim(1);
+	const late = db.enqueue(
+		a.id,
+		1,
+		"older-source-event",
+		"Slack source time10",
+		"event",
+	);
+	expect(
+		db.enqueue(a.id, 1, "older-source-event", "Slack source time10", "event")
+			.id,
+	).toBe(late.id);
+	expect(() =>
+		db.enqueue(a.id, 1, "older-source-event", "Changed", "event"),
+	).toThrow("payload conflict");
+	const other = db.enqueue(
+		b.id,
+		1,
+		"older-source-event",
+		"Linear update",
+		"event",
+	);
+	expect(other.id).not.toBe(late.id);
+	expect(db.claim(2).map((c) => c.occurrence.id)).toEqual([other.id]);
+	db.finish(running!.occurrence, true);
+	db.close();
+	const reopened = new AutomationLedger(path, "workspace-a", () => now);
+	ledgers.push(reopened);
+	expect(reopened.claim(1).map((c) => c.occurrence.id)).toEqual([late.id]);
+	expect(reopened.status(a.id).occurrences.map((o) => o.input)).toEqual([
+		"Slack source time20",
+		"Slack source time10",
+	]);
+	expect(reopened.status(a.id).occurrences[0]?.id).toBe(active.id);
+	reopened.upsert({ ...a, revision: 2, state: "paused" });
+	expect(reopened.status(a.id).occurrences[1]?.status).toBe("cancelled");
+	expect(() =>
+		reopened.enqueue(a.id, 1, "after-pause", "No access", "event"),
+	).toThrow();
+	now += 100000;
+	expect(reopened.claim(2).every((c) => c.definition.id !== a.id)).toBe(true);
+});
+
+it("bounds receipt retries independently and does not resurrect them on definition edits", async () => {
+	let now = Date.now();
+	const db = await ledger(() => now);
+	const d = definition();
+	db.upsert(d);
+	db.enqueue(d.id, 1, "receipt", "result");
+	const [first] = db.claim(1);
+	db.markReceipt(first!.occurrence, d, digest("private-checkpoint"));
+	db.upsert({ ...d, revision: 2, state: "paused" });
+	db.finish(first!.occurrence, false);
+	for (const advance of [6000, 11000]) {
+		now += advance;
+		const [claim] = db.claim(1, false);
+		expect(claim!.definition.revision).toBe(1);
+		db.finish(claim!.occurrence, false);
+	}
+	expect(db.status(d.id).occurrences[0]?.status).toBe("blocked");
+	db.upsert({ ...d, revision: 3 });
+	now += 100000;
+	expect(db.claim(2, false)).toEqual([]);
 });

@@ -29,7 +29,7 @@ const occurrenceSchema = z
 		automationId: z.string(),
 		revision: z.number().int(),
 		input: z.string().max(100_000),
-		trigger: z.enum(["instruction", "tick"]),
+		trigger: z.enum(["instruction", "event", "tick"]),
 		scheduledAt: z.string(),
 		order: z.number().int(),
 		status: z.enum(["queued", "running", "completed", "cancelled", "blocked"]),
@@ -38,6 +38,14 @@ const occurrenceSchema = z
 		fence: z.number().int(),
 		leaseUntil: z.number(),
 		availableAt: z.number(),
+		receipt: z
+			.object({
+				definition: registrationSchema,
+				scopeKey: z.string().regex(/^[a-f0-9]{64}$/),
+				attempts: z.number().int().positive(),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict();
 export type AutomationOccurrence = z.infer<typeof occurrenceSchema>;
@@ -170,6 +178,7 @@ export class AutomationLedger {
 			for (const occurrence of Object.values(state.occurrences)) {
 				if (
 					occurrence.automationId === definition.id &&
+					!occurrence.receipt &&
 					!["completed", "cancelled"].includes(occurrence.status)
 				)
 					occurrence.status = "cancelled";
@@ -182,17 +191,18 @@ export class AutomationLedger {
 		revision: number,
 		eventId: string,
 		input: string,
+		trigger: "instruction" | "event" = "instruction",
 	): AutomationOccurrence {
 		if (input.length > 100_000) throw new Error("Automation input limit");
 		return this.transact((state, now) => {
 			const definition = this.definition(state, automationId, revision);
-			const key = instructionKey(definition, eventId);
+			const key = instructionKey(definition, eventId, trigger);
 			const old = state.occurrences[key];
 			if (old) {
 				if (old.input !== input) throw new Error("Occurrence payload conflict");
 				return old;
 			}
-			return this.add(state, definition, key, input, "instruction", now);
+			return this.add(state, definition, key, input, trigger, now);
 		});
 	}
 	private definition(
@@ -214,7 +224,7 @@ export class AutomationLedger {
 		definition: AutomationRegistration,
 		key: string,
 		input: string,
-		trigger: "instruction" | "tick",
+		trigger: "instruction" | "event" | "tick",
 		now: number,
 	): AutomationOccurrence {
 		if (
@@ -241,12 +251,16 @@ export class AutomationLedger {
 		state.occurrences[key] = occurrence;
 		return occurrence;
 	}
-	claim(limit: number): Array<{
+	claim(
+		limit: number,
+		executeEnabled = true,
+	): Array<{
 		definition: AutomationRegistration;
 		occurrence: AutomationOccurrence;
 	}> {
 		return this.transact((state, now) => {
 			for (const [key, definition] of Object.entries(state.definitions)) {
+				if (!executeEnabled) break;
 				const tick = latestTick(definition, now, state.lastSlots[key] ?? null);
 				if (!tick) continue;
 				// Keep one queued coalesced tick; explicit instruction occurrences remain FIFO.
@@ -254,6 +268,7 @@ export class AutomationLedger {
 					if (
 						o.automationId === definition.id &&
 						o.trigger === "tick" &&
+						!o.receipt &&
 						o.status === "queued"
 					)
 						o.status = "cancelled";
@@ -275,7 +290,9 @@ export class AutomationLedger {
 			for (const o of Object.values(state.occurrences)) {
 				if (o.status === "running" && o.leaseUntil <= now) {
 					o.status =
-						o.attempts >= AUTOMATION_LIMITS.maxAttempts ? "blocked" : "queued";
+						(o.receipt?.attempts ?? o.attempts) >= AUTOMATION_LIMITS.maxAttempts
+							? "blocked"
+							: "queued";
 				}
 			}
 			const running = Object.values(state.occurrences).filter(
@@ -301,18 +318,26 @@ export class AutomationLedger {
 					)
 				)
 					break;
-				const definition = state.definitions[digest(o.automationId)];
+				const definition =
+					o.receipt?.definition ?? state.definitions[digest(o.automationId)];
 				if (
 					!definition ||
-					definition.state !== "enabled" ||
-					definition.revision !== o.revision ||
+					(!o.receipt &&
+						(!executeEnabled ||
+							definition.state !== "enabled" ||
+							definition.revision !== o.revision)) ||
 					o.status !== "queued" ||
-					o.availableAt > now ||
 					busy.has(definition.namespace)
 				)
 					continue;
+				if (o.availableAt > now) {
+					// Backoff does not let later arrivals overtake the same namespace.
+					busy.add(definition.namespace);
+					continue;
+				}
 				o.status = "running";
 				o.attempts++;
+				if (o.receipt) o.receipt.attempts++;
 				o.fence++;
 				o.attemptId = randomUUID();
 				o.leaseUntil = now + AUTOMATION_LIMITS.leaseSeconds * 1000;
@@ -322,10 +347,43 @@ export class AutomationLedger {
 			return claims;
 		});
 	}
+	/** Persist before transmitting a terminal result. Receipt recovery survives edits/pause. */
+	markReceipt(
+		claim: AutomationOccurrence,
+		definition: AutomationRegistration,
+		scopeKey: string,
+	): void {
+		this.transact((state, now) => {
+			const o = state.occurrences[claim.id];
+			if (
+				!o ||
+				o.status !== "running" ||
+				o.attemptId !== claim.attemptId ||
+				o.fence !== claim.fence ||
+				o.leaseUntil <= now
+			)
+				throw new Error("Stale receipt owner");
+			if (o.receipt) {
+				if (
+					o.receipt.scopeKey !== scopeKey ||
+					digest(o.receipt.definition) !== digest(definition)
+				)
+					throw new Error("Receipt identity changed");
+			} else {
+				if (
+					digest(this.definition(state, claim.automationId, claim.revision)) !==
+					digest(definition)
+				)
+					throw new Error("Receipt definition changed");
+				o.receipt = { definition, scopeKey, attempts: 1 };
+			}
+		});
+	}
 	renew(claim: AutomationOccurrence): void {
 		this.transact((state, now) => {
-			this.definition(state, claim.automationId, claim.revision);
 			const o = state.occurrences[claim.id];
+			if (!o?.receipt)
+				this.definition(state, claim.automationId, claim.revision);
 			if (
 				!o ||
 				o.status !== "running" ||
@@ -350,7 +408,7 @@ export class AutomationLedger {
 				return;
 			if (success) o.status = "completed";
 			else {
-				const delay = retryDelayMilliseconds(o.attempts);
+				const delay = retryDelayMilliseconds(o.receipt?.attempts ?? o.attempts);
 				o.status = delay === null ? "blocked" : "queued";
 				o.availableAt = now + (delay ?? 0);
 				o.leaseUntil = 0;

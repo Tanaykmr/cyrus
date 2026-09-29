@@ -83,7 +83,7 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 	const receipts = new Map<string, string>();
 	let commits = 0,
 		calls = 0;
-	const app = Fastify();
+	const app = Fastify({ forceCloseConnections: true });
 	app.all("/mcp", async (request, reply) => {
 		// Stateless hosted JSON transport rejects the SDK optional SSE request.
 		if (request.method === "GET")

@@ -34,7 +34,12 @@ export interface AutomationRuntimeOptions {
 		credential: () => McpCredential,
 		signal: AbortSignal,
 	) => ScopedAutomationTools;
-	readiness: () => { reason: string | null; harness: string; model: string };
+	readiness: () => {
+		reason: string | null;
+		controlReason?: string | null;
+		harness: string;
+		model: string;
+	};
 	pollMilliseconds?: number;
 	renewMilliseconds?: number;
 }
@@ -43,7 +48,7 @@ export interface AutomationRuntimeOptions {
 export class AutomationRuntime {
 	private readonly instanceId = randomUUID();
 	private readonly active = new Map<string, AbortController>();
-	private draining?: Promise<void>;
+	private readonly drains = new Set<Promise<void>>();
 	private poll?: ReturnType<typeof setInterval>;
 	private stopped = false;
 	constructor(private readonly options: AutomationRuntimeOptions) {}
@@ -70,6 +75,8 @@ export class AutomationRuntime {
 			capabilities: {
 				automations: true,
 				scheduledTicks: true,
+				eventInputs: true,
+				harnessStreaming: false,
 				scopedMcp: true,
 				currentAuthorityResume: true,
 				resultReconciliation: true,
@@ -88,17 +95,29 @@ export class AutomationRuntime {
 		this.poll.unref();
 		void this.wake().catch(() => {});
 	}
+	canDrain(): boolean {
+		return (
+			!this.stopped &&
+			!!this.options.workspaceId() &&
+			!!this.options.ledger &&
+			!this.options.readiness().controlReason
+		);
+	}
 	wake(): Promise<void> {
-		if (this.draining) return this.draining;
-		if (this.stopped || !this.capabilities().available)
-			return Promise.resolve();
-		this.draining = this.drain().finally(() => {
-			this.draining = undefined;
-		});
-		return this.draining;
+		if (!this.canDrain()) return Promise.resolve();
+		// SQLite claims atomically account for every running occurrence. A wake
+		// during a slow turn may fill another workspace slot without exceeding it.
+		const draining = this.drain();
+		this.drains.add(draining);
+		const done = () => this.drains.delete(draining);
+		void draining.then(done, done);
+		return draining;
 	}
 	private async drain(): Promise<void> {
-		const claims = this.ledger().claim(AUTOMATION_LIMITS.workspaceConcurrency);
+		const claims = this.ledger().claim(
+			AUTOMATION_LIMITS.workspaceConcurrency,
+			this.capabilities().available,
+		);
 		await Promise.allSettled(
 			claims.map(async ({ definition, occurrence }) => {
 				try {
@@ -128,8 +147,15 @@ export class AutomationRuntime {
 		revision: number,
 		eventId: string,
 		input: string,
+		trigger: "instruction" | "event" = "instruction",
 	) {
-		return this.ledger().enqueue(automationId, revision, eventId, input);
+		return this.ledger().enqueue(
+			automationId,
+			revision,
+			eventId,
+			input,
+			trigger,
+		);
 	}
 	status(automationId: string) {
 		return this.ledger().status(automationId);
@@ -164,7 +190,7 @@ export class AutomationRuntime {
 			),
 		);
 		const next = admission.authority;
-		this.check(next);
+		this.check(next, !!occurrence.receipt);
 		if (
 			(next.definition.grants.length > 0 &&
 				next.definition.grants[0]?.id !== admission.mcp.grantId) ||
@@ -184,17 +210,19 @@ export class AutomationRuntime {
 		this.ledger().renew(occurrence);
 		return admission;
 	}
-	private check(authority: AutomationAuthority): void {
+	private check(authority: AutomationAuthority, receiptOnly = false): void {
 		const configured = this.options.readiness();
 		if (
 			this.stopped ||
 			authority.definition.workspaceId !== this.options.workspaceId() ||
-			authority.definition.state !== "enabled" ||
 			Date.parse(authority.leaseUntil) <= Date.now() ||
-			configured.reason ||
-			authority.definition.target.harness !== configured.harness ||
-			authority.definition.target.model !== configured.model ||
-			authority.definition.role === "engineering"
+			configured.controlReason ||
+			(!receiptOnly &&
+				(authority.definition.state !== "enabled" ||
+					configured.reason ||
+					authority.definition.target.harness !== configured.harness ||
+					authority.definition.target.model !== configured.model ||
+					authority.definition.role === "engineering"))
 		)
 			throw new Error("Automation authority unavailable");
 	}
@@ -205,11 +233,15 @@ export class AutomationRuntime {
 	): Promise<void> {
 		const initial = admission.authority;
 		const key = checkpointKey(initial);
-		if (this.active.has(key)) return;
+		if (occurrence.receipt && occurrence.receipt.scopeKey !== key)
+			throw new Error("Receipt checkpoint identity changed");
+		if (this.active.has(key)) throw new Error("Occurrence already active");
 		const controller = new AbortController();
 		this.active.set(key, controller);
 		let authority = initial;
 		let credential = admission.mcp;
+		let receiptOnly = !!occurrence.receipt;
+
 		const tools = this.options.tools(
 			() => authority,
 			() => credential,
@@ -229,7 +261,7 @@ export class AutomationRuntime {
 			renewing = tools
 				.renew(async () => {
 					controller.signal.throwIfAborted();
-					this.check(authority);
+					this.check(authority, receiptOnly);
 					const renewed = await this.admit(
 						definition,
 						occurrence,
@@ -237,7 +269,7 @@ export class AutomationRuntime {
 						controller.signal,
 					);
 					const next = renewed.authority;
-					this.check(next);
+					this.check(next, receiptOnly);
 					if (
 						checkpointKey(next) !== key ||
 						next.attemptId !== initial.attemptId ||
@@ -266,7 +298,7 @@ export class AutomationRuntime {
 			await fresh();
 			let state = await this.options.store.load(key);
 			if (!state) {
-				if (authority.phase === "reconcile")
+				if (receiptOnly || authority.phase === "reconcile")
 					throw new Error("Missing terminal checkpoint");
 				state = {
 					version: 1,
@@ -283,7 +315,7 @@ export class AutomationRuntime {
 				await this.options.store.save(state);
 			}
 			if (
-				authority.phase === "reconcile" &&
+				(receiptOnly || authority.phase === "reconcile") &&
 				state.pending?.step.type !== "result"
 			)
 				throw new Error("No terminal result to reconcile");
@@ -316,6 +348,11 @@ export class AutomationRuntime {
 					if (step.type === "tool") authorizeTool(authority, step.call);
 					state.pending = { key: digest([key, state.sequence, step]), step };
 					await this.options.store.save(state);
+				}
+				if (state.pending.step.type === "result") {
+					this.ledger().markReceipt(occurrence, definition, key);
+					occurrence.receipt ??= { definition, scopeKey: key, attempts: 1 };
+					receiptOnly = true;
 				}
 				await this.perform(state, authority, tools, controller.signal, fresh);
 				if (state.status === "completed") return;
@@ -382,6 +419,6 @@ export class AutomationRuntime {
 		this.stopped = true;
 		clearInterval(this.poll);
 		for (const controller of this.active.values()) controller.abort();
-		await this.draining?.catch(() => {});
+		await Promise.allSettled([...this.drains]);
 	}
 }

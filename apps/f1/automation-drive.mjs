@@ -60,6 +60,12 @@ export async function runAutomationDrive() {
 	};
 	let owner,
 		lostAck = false;
+	let holdEventModel = false,
+		eventModelStarted = false;
+	let releaseEventModel;
+	const eventModelGate = new Promise((resolve) => {
+		releaseEventModel = resolve;
+	});
 	const app = Fastify({ logger: false });
 	function definition(
 		id,
@@ -95,7 +101,9 @@ export async function runAutomationDrive() {
 		)
 			return denied(reply, 401);
 		const b = request.body,
-			d = definitions.get(b.automationId);
+			d =
+				results.get(b.occurrenceId)?.definition ??
+				definitions.get(b.automationId);
 		if (
 			!d ||
 			d.state !== "enabled" ||
@@ -173,7 +181,11 @@ export async function runAutomationDrive() {
 			const previous = results.get(b.occurrenceId);
 			if (previous) assert.equal(previous.key, b.idempotencyKey);
 			else {
-				results.set(b.occurrenceId, { key: b.idempotencyKey, text: b.text });
+				results.set(b.occurrenceId, {
+					key: b.idempotencyKey,
+					text: b.text,
+					definition: d,
+				});
 				counts.resultCommits++;
 				await writeFile(
 					join(directory, "results.json"),
@@ -198,6 +210,15 @@ export async function runAutomationDrive() {
 		counts.models++;
 		assert.equal(request.headers["x-api-key"], modelKey);
 		const text = JSON.stringify(request.body);
+		if (holdEventModel && text.includes("event-live-slack")) {
+			eventModelStarted = true;
+			await eventModelGate;
+		}
+		assert.ok(
+			["event-live-slack", "event-late-slack", "event-live-linear"].filter(
+				(marker) => text.includes(marker),
+			).length <= 1,
+		);
 		assert.ok(!text.includes(supervisorKey));
 		assert.ok(!text.includes('"token"'));
 		assert.ok(!text.includes('"grantId"'));
@@ -337,7 +358,8 @@ export async function runAutomationDrive() {
 		if (value.startsWith(`${origin}/`)) return realFetch(url, options);
 		throw new Error("F1 external network denied");
 	};
-	let runtimeApp, runtime;
+	let runtimeApp, runtime, runtimeOrigin;
+	let modelEnabled = true;
 	const ledger = new AutomationLedger(join(directory, "ledger"), "workspace-a");
 	function makeRuntime() {
 		runtime = new AutomationRuntime({
@@ -352,7 +374,10 @@ export async function runAutomationDrive() {
 				apiKey: modelKey,
 			})),
 			store: new AutomationCheckpointStore(checkpoints),
-			readiness: () => ({ ...target, reason: null }),
+			readiness: () => ({
+				...target,
+				reason: modelEnabled ? null : "Configured model unavailable",
+			}),
 			pollMilliseconds: 50,
 			tools: (authority, credential, signal) =>
 				new ScopedAutomationMcpClient(
@@ -367,17 +392,25 @@ export async function runAutomationDrive() {
 		return runtimeApp;
 	}
 	try {
-		await makeRuntime().ready();
-		const call = (path, body, key = supervisorKey) =>
-			runtimeApp.inject({
-				method: "POST",
-				url: `/api/automations/v1/${path}`,
-				headers: { authorization: `Bearer ${key}` },
-				payload: body,
-			});
+		runtimeOrigin = await makeRuntime().listen({ host: "127.0.0.1", port: 0 });
+		const call = async (path, body, key = supervisorKey) => {
+			const response = await realFetch(
+				`${runtimeOrigin}/api/automations/v1/${path}`,
+				{
+					method: "POST",
+					headers: {
+						authorization: `Bearer ${key}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify(body),
+				},
+			);
+			const result = await response.json();
+			return { statusCode: response.status, json: () => result };
+		};
 		assert.equal(
-			(await runtimeApp.inject({ url: "/api/automations/v1/capabilities" }))
-				.statusCode,
+			(await realFetch(`${runtimeOrigin}/api/automations/v1/capabilities`))
+				.status,
 			401,
 		);
 		assert.equal(
@@ -421,6 +454,12 @@ export async function runAutomationDrive() {
 		);
 		await until(() => counts.resultCommits === 2);
 		assert.equal(ledger.status(manual.id).occurrences.length, 1);
+		const visible = await realFetch(
+			`${runtimeOrigin}/api/automations/v1/status/${manual.id}`,
+			{ headers: { authorization: `Bearer ${supervisorKey}` } },
+		);
+		assert.equal(visible.status, 200);
+		assert.equal((await visible.json()).occurrences.length, 1);
 		await until(
 			() => ledger.status(tick.id).occurrences[0]?.status === "completed",
 		);
@@ -442,6 +481,14 @@ export async function runAutomationDrive() {
 			eventId: "ack-event",
 		});
 		await until(() => lostAck);
+		const paused = { ...loss, revision: 2, state: "paused" };
+		definitions.set(loss.id, paused);
+		assert.equal(
+			(await call("definitions", { contractVersion: 1, definition: paused }))
+				.statusCode,
+			200,
+		);
+		modelEnabled = false;
 		const modelBefore = counts.models,
 			progressBefore = counts.progress,
 			toolsBefore = counts.tools;
@@ -451,7 +498,7 @@ export async function runAutomationDrive() {
 			grant.until = 0;
 			grant.revoked = true;
 		}
-		await makeRuntime().ready();
+		runtimeOrigin = await makeRuntime().listen({ host: "127.0.0.1", port: 0 });
 		await until(
 			() => ledger.status(loss.id).occurrences[0]?.status === "completed",
 			15000,
@@ -461,6 +508,7 @@ export async function runAutomationDrive() {
 		assert.equal(counts.models, modelBefore);
 		assert.equal(counts.progress, progressBefore);
 		assert.equal(counts.tools, toolsBefore);
+		modelEnabled = true;
 		// Real connection/session tests, using an explicitly admitted fixture authority.
 		const d = definition("session-probe", "probe");
 		runtime.upsert(d);
@@ -566,6 +614,7 @@ export async function runAutomationDrive() {
 			),
 		);
 		await reconnect.close();
+		ledger.finish(claimed.occurrence, true);
 		assert.equal(
 			(
 				await realFetch(`${origin}/mcp`, {
@@ -584,6 +633,109 @@ export async function runAutomationDrive() {
 			).status,
 			401,
 		);
+		// Signed-provider interpretation belongs to Hosted. These are already admitted
+		// opaque inputs; exercise the generic HTTP queue while a model turn is active.
+		await runtimeApp.close();
+		owner.until = 0;
+		runtimeOrigin = await makeRuntime().listen({ host: "127.0.0.1", port: 0 });
+		const slackEvents = definition("slack-events", "event-customer-a", "slack");
+		const linearEvents = definition("linear-events", "event-customer-b");
+		for (const d of [slackEvents, linearEvents])
+			await call("definitions", { contractVersion: 1, definition: d });
+		const eventInput = (d, id, input) => ({
+			contractVersion: 1,
+			automationId: d.id,
+			revision: 1,
+			eventId: id,
+			input,
+			trigger: "event",
+		});
+		const eventBase = counts.resultCommits;
+		holdEventModel = true;
+		assert.equal(
+			(
+				await call(
+					"occurrences",
+					eventInput(slackEvents, "source-event-newer", "event-live-slack"),
+				)
+			).statusCode,
+			200,
+		);
+		await until(() => eventModelStarted);
+		const late = eventInput(
+			slackEvents,
+			"source-event-older",
+			"event-late-slack",
+		);
+		const queued = await call("occurrences", late);
+		assert.equal(queued.statusCode, 200);
+		assert.equal(
+			(await call("occurrences", late)).json().occurrenceId,
+			queued.json().occurrenceId,
+		);
+		assert.equal(
+			(await call("occurrences", { ...late, input: "changed" })).statusCode,
+			409,
+		);
+		assert.deepEqual(
+			ledger.status(slackEvents.id).occurrences.map((o) => o.status),
+			["running", "queued"],
+		);
+		assert.equal(
+			(
+				await call(
+					"occurrences",
+					eventInput(linearEvents, "source-event-older", "event-live-linear"),
+				)
+			).statusCode,
+			200,
+		);
+		await until(() => counts.resultCommits === eventBase + 1);
+		await runtimeApp.close();
+		holdEventModel = false;
+		releaseEventModel();
+		assert.equal(ledger.status(slackEvents.id).occurrences.length, 2);
+		owner.until = 0;
+		for (const g of grants.values()) {
+			g.revoked = true;
+			g.until = 0;
+		}
+		runtimeOrigin = await makeRuntime().listen({ host: "127.0.0.1", port: 0 });
+		await until(
+			() =>
+				ledger
+					.status(slackEvents.id)
+					.occurrences.every((o) => o.status === "completed"),
+			15000,
+		);
+		assert.equal(counts.resultCommits, eventBase + 3);
+		await runtime.stop();
+		assert.equal(
+			(
+				await call(
+					"occurrences",
+					eventInput(slackEvents, "paused-event", "must never run"),
+				)
+			).statusCode,
+			200,
+		);
+		await call("definitions", {
+			contractVersion: 1,
+			definition: { ...slackEvents, revision: 2, state: "paused" },
+		});
+		assert.equal(
+			ledger.status(slackEvents.id).occurrences.at(-1).status,
+			"cancelled",
+		);
+		assert.equal(
+			(
+				await call(
+					"occurrences",
+					eventInput(slackEvents, "after-pause", "denied"),
+				)
+			).statusCode,
+			409,
+		);
 		for (const filename of await readdir(checkpoints)) {
 			const saved = await readFile(join(checkpoints, filename), "utf8");
 			assert.ok(!saved.includes(supervisorKey));
@@ -596,10 +748,12 @@ export async function runAutomationDrive() {
 			directory,
 			counts,
 			assertions: [
-				"registered instruction",
+				"instruction through registered HTTP routes",
+				"admitted Slack/Linear event idle wake, active-turn queue, duplicate/out-of-order delivery and restart retention",
+				"event pause denial and cross-customer context separation",
 				"actual scheduled tick",
 				"non-customer automation",
-				"durable result ACK recovery after restart",
+				"durable result ACK recovery after pause and restart with model unavailable",
 				"no model/tool/progress reopening",
 				"real MCP SDK initialize/list/call/reconnect",
 				"open-session expiry/revocation",
@@ -610,7 +764,7 @@ export async function runAutomationDrive() {
 			],
 			limitations: [
 				"Hosted authority/provider/model transports are controlled fixtures; real hosted connected gate still required",
-				"No live provider or model calls",
+				"No live provider or model calls; actual signature/subscription/mapping proof is Hosted-owned",
 				"Single-bound Linear/Slack tools only; engineering lifecycle integration pending",
 			],
 		};
@@ -620,6 +774,7 @@ export async function runAutomationDrive() {
 		);
 		return summary;
 	} finally {
+		releaseEventModel();
 		await runtimeApp?.close();
 		ledger.close();
 		for (const session of sessions.values()) await session.server.close();

@@ -1,3 +1,64 @@
+# Queued events and terminal receipt follow-up
+
+The expanded registered-HTTP F1 passes instruction, real clock tick, synthetic admitted
+Slack/Linear event idle wake, active-turn queue, duplicate/late-arrival input, another
+customer filling the free workspace slot, restart retention, pause denial and isolated
+model contexts. Counts:7 committed results,8 transmissions,9 MCP reads,15 model steps.
+Actual provider ingress/signatures/subscriptions remain Hosted-owned and are not claimed
+by this synthetic-input test. Final acceptance includes the connected event-driven path;
+instruction/tick alone is a milestone.
+
+Terminal result receipts are marked durably before first send, with original definition
+and checkpoint plus a separate three-attempt budget in the same SQLite occurrence.
+Paused/deleted/edited definitions and model unavailability do not cancel receipt recovery.
+Restart tests retain original revision/payload/key, acquire a new attempt, and reopen no
+model/progress/tools. Missing or mismatched terminal checkpoint fails closed.
+
+Validation before publication:30 generic/SDK tests pass on Node22; full edge-worker suite
+906 passed,6 skipped on Node26. Node22 CI teardown hang was reproduced after successful
+abort assertions and fixed with forced fixture connection cleanup. No runtime rejection
+suppression was introduced. Current-head CI and immutable artifact/Hosted rerun evidence
+must be recorded before acceptance. Previous artifacts/evidence follow unchanged below.
+
+---
+
+# Intermediate runtime checkpoint: dd0a6caf
+
+Implementation/artifact source: `dd0a6cafb6051d138d38cf88b5160b2dff37562d`.
+The earlier e4de bundle below is superseded for connected acceptance. Joined testing
+found an unhandled Node rejection when the SDK cancelled a transformed GET405 body.
+The runtime now buffers bounded JSON bytes before SDK consumption. The regression
+includes real network GET405 bodies, oversized responses and an aborted pending call;
+all pass without suppressing unhandled rejections. Full edge suite:901 passed,
+6 skipped; full build/typecheck pass.
+
+[Current F1](evidence/registered-automations-dd0a6caf/summary.json) uses real HTTP
+requests to production registered definition/enqueue/status routes. Operator instruction,
+clock-generated tick, non-customer work and result-ACK recovery pass (4 commits,
+5 transmissions). Handler choice remains the shared server's route-registration
+lifecycle, with one SQLite scheduling ledger and no customer policy in CYPACK.
+
+Replacement17-package bundle:
+`/Users/agentops/.cyrus/CYPACK-1546/attachments/automation-dd0a6caf/cyrus-0.2.72-cypack1546.dd0a6cafb605-test-bundle.tar.gz`
+
+SHA256: `a2f5c978043028deb06067153c94034e9682ec6584d86ae47e5f3719f026a39d`.
+[Fresh isolated install/provenance](evidence/registered-automations-dd0a6caf/package-verification.json)
+and [installed registered discovery](evidence/registered-automations-dd0a6caf/installed-smoke.json)
+pass. Use the build/install procedure below with dd0a's full source SHA and new paths.
+The existing e4de/269e artifacts remain preserved. No minimum published version.
+
+Hosted's exploratory SQL/HTTP joined test passed instruction+due tick, four scoped
+reads across token rotation, two authoritative messages and automatic lost-result-ACK
+recovery (three result transmissions, six model steps). That exploratory run lacked
+frozen source hashes. An exact installed-dd0a rerun through registered HTTP routes is
+being coordinated; it must be recorded against an immutable hosted head before claiming
+joint acceptance. Authority/model/provider fixture and production-registration limits
+remain explicit. No release, merge, deployment or live provider effects.
+
+---
+
+## Historical e4de evidence
+
 # Registered automations: instruction, tick and scoped MCP
 
 Runtime implementation: `e4de0e6707ab82d5ef8ec56509e6abe947b884c0` (PR1507).

@@ -32,11 +32,19 @@ and `Authorization: Bearer <CYRUS_API_KEY>` are reused. Hosted resolves that end
 through its existing registered-runtime infrastructure/webhook resolver. No new
 hostname, port, customer-runtime URL or model key is required.
 
+Handler/lifecycle choice: the existing shared server's route registration convention
+already supports generic occurrences, so no new chat/ticket Handler subclass is needed.
+`registerConfiguredAutomations` creates the contained runtime and `registerAutomationRoutes`
+mounts its authenticated handlers. Server onReady starts polling; onClose aborts/drains
+execution before closing SQLite. Both active and repository-less modes use this path.
+Instruction/tick F1 setup uses real HTTP definition/enqueue/status requests to these
+handlers, not a second dispatch engine. Customer policy remains solely in Hosted.
+
 | Route | Request / response |
 | --- | --- |
 | GET `/api/automations/v1/capabilities` | Authenticated readiness, exact configured target/adapter, contract 1 and isolation flags |
 | POST `/api/automations/v1/definitions` | `{contractVersion:1,definition}` -> `{contractVersion:1,automationId,revision,state}` |
-| POST `/api/automations/v1/occurrences` | `{contractVersion:1,automationId,revision,eventId,input}` -> `{contractVersion:1,occurrenceId,status}` |
+| POST `/api/automations/v1/occurrences` | `{contractVersion:1,automationId,revision,eventId,input,trigger?:"instruction"|"event"}` -> `{contractVersion:1,occurrenceId,status}` |
 | POST `/api/automations/v1/wake` | Exactly `{contractVersion:1}` -> 202 accepted; never accepts customer/scope/model selectors |
 | GET `/api/automations/v1/status/:automationId` | Applied definition and persisted occurrence statuses; supervisor-authenticated, not an agent tool |
 
@@ -49,7 +57,8 @@ Target is `{harness,model}` and must match the compatible configured runtime.
 
 State is enabled/paused/deleted. Same revision+same body is idempotent; same revision
 with different body or lower revision rejects. Pause/delete/edit are new revisions
-that invalidate queued/running old work. Delete retains a tombstone and cannot be
+that invalidate queued/running old model work. Pending terminal receipts survive with
+their immutable original definition and checkpoint identity. Delete retains a tombstone and cannot be
 resurrected. Enqueue rejects changed payload under an existing event identity.
 
 ## Scheduling, recovery and bounds
@@ -83,7 +92,44 @@ Checkpoint identity binds definition, namespace/workspace, revision, occurrence 
 it excludes attempts, renewable leases and MCP credentials. Pending tool/result and its
 immutable key persist before send. Uncertain effects reconcile with that key on another
 attempt, never a new send identity. Completed-result recovery opens no model/progress/MCP
-session. Missing terminal checkpoints fail closed. Bound retry exhaustion stays blocked.
+session. Missing terminal checkpoints fail closed. Before first result send, the same SQLite
+ledger durably marks the occurrence as receipt-only, retaining its original definition
+and a separate three-attempt receipt budget. Pause/edit/delete and model unavailability
+cannot cancel this reconciliation. Current supervisor registration/ownership and Hosted
+receipt authority remain mandatory. Receipt claims cannot reopen model, progress or MCP
+work; exhausted receipts stay blocked. No second queue engine or scheduling ledger.
+
+## Admitted event inputs
+
+The additive event discriminator/capability proposal has been sent to the Hosted owner;
+its exact wire acknowledgment and connected use remain an integration gate. Existing
+instruction bodies and identities remain compatible. Do not enable the new event
+discriminator against a Hosted callback schema that has not accepted it.
+
+Operator instructions and provider events share the authenticated occurrence handler.
+Omitted trigger defaults to `instruction`; `event` is explicit for already-admitted
+provider input. Stable SHA256 identity includes workspace, automation, revision,
+trigger and opaque eventId. Discovery advertises `eventInputs:true` and
+`harnessStreaming:false`; old runtimes must fail capability validation before event
+delivery rather than ignore the new field or select a legacy runner.
+
+Delivery is arrival FIFO within a namespace. Source timestamps do not reorder an
+already-running turn; duplicate IDs retain the original payload and changed payloads
+under the same ID reject. Backoff reserves namespace order. The current contained
+Messages adapter queues a new occurrence and never injects events into active model
+messages. Another authorized namespace can fill the remaining workspace slot.
+SQLite persists arrivals while execution is active; Hosted outbox retains delivery
+while the registered runtime is offline. Pause/revision/revocation prevents pending
+model work from regaining old authority; terminal receipt reconciliation remains separate.
+
+CYPACK accepts no provider/customer/channel/issue selector in this envelope. CYHOST
+alone interprets existing signature-verified ingress, resolves exact mappings, applies
+subscription/type policy and admits the immutable event input. Unmapped or ambiguous
+sources must not be routed, and a channel notification cannot broaden a thread grant.
+Runtime F1 uses synthetic admitted Slack/Linear inputs; it does not verify provider
+subscriptions/signatures or claim that every notification type is supported. Final
+acceptance requires Hosted's exact event/subscription inventory and connected ingress
+proof, in addition to the instruction/tick milestone.
 
 ## Supervisor admission and callbacks
 
@@ -96,7 +142,7 @@ POST `/api/automations/v1/authorize`:
 ```text
 {contractVersion:1,instanceId,automationId,revision,occurrenceId,attemptId,fence,
  definition:<registration>,
- occurrence:{id,trigger:"instruction"|"tick",scheduledAt,input},
+ occurrence:{id,trigger:"instruction"|"event"|"tick",scheduledAt,input},
  phase:"admit"|"renew"}
 ```
 
