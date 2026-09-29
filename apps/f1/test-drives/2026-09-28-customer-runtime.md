@@ -143,3 +143,149 @@ CYRUS_TEST_SANDBOX_IMAGE=sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750c
 pnpm build
 CYRUS_TEST_SANDBOX_IMAGE=sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 CYRUS_TEST_DOCKER_HOST=unix:///Users/agentops/.docker/run/docker.sock bun run apps/f1/scoped-runtime-drive.ts
 ```
+
+## Connected hosted gateway and installed artifact (2026-09-29 UTC)
+
+This section records the already-completed connected drive; no shared work was
+repeated to prepare this report. Runtime implementation and installable artifact
+source: `269e051d4a7190c46999ed38773297662dd526f3` (PR #1507).
+Subsequent report-only commits do not change that tested implementation or artifact.
+
+The driver imported the **isolated installed package**, registered production
+runtime HTTP routes, used its private checkpoint store and executed commands in
+real Docker containers. It called the actual hosted
+`/api/customer-runtime/v1/{authorize,progress,engineering,result}` POST handler
+and real local Supabase/SQL through `http://127.0.0.1:3022`. Hosted was an
+uncommitted gateway slice on `8cef8367439cc9aaccb0ab68c574e4fd098babf2` (PR #1102);
+its exact gateway, publication, fixture and migration file hashes are preserved
+in `connected-evidence/hosted-source-identities.json` in the handoff below.
+
+The model steps and GitHub transport were controlled fixtures with deliberate
+lost acknowledgements; external network was denied by the hosted fixture. The
+loopback HTTP adapter existed only in the test driver. Production HTTPS
+validation was unchanged. There were no live provider/model calls or spend.
+
+### Observed assertions
+
+- Actual hosted admission denied a live different owner. Explicit interruption
+  permitted a new resume owner, and the old owner's authorization was denied.
+- A 92-second model turn survived the original 90-second lease through actual
+  same-owner hosted renewals and runtime deadline updates.
+- The reviewed inclusive-range synthetic test initially failed. Real sandbox
+  diagnostics reached the model; the repair was checkpointed and its rerun
+  passed using Bun's node:test compatibility runner.
+- GitHub fixture created one PR and lost its acknowledgement. Runtime also lost
+  the publication callback acknowledgement, preserving the pending publication.
+  Hosted reconciled the exact PR; resume sent identical files/operation/key with
+  a new execution ID and did not create another PR.
+- Hosted committed the result and lost its acknowledgement. Recovery resent the
+  immutable result/key under a new owner, without another model turn, sandbox or
+  progress callback. Locally completed recovery repeated no result callback.
+- The second customer's active engineering assignment was revoked; its runtime
+  stopped and resume was denied. Engineering read/action/delegate requests were
+  denied. The unrelated workspace's result remained separate.
+- Three distinct runtime checkpoints were private, owned by the runtime UID and
+  scoped to the authenticated customer/workspace/run identities.
+- Durable evidence contained one succeeded publication and five scoped events:
+  publication plus findings for each of the two sponsoring customer threads,
+  and one findings event for the other workspace. No revoked-run result existed.
+
+The drive's last aggregate receipt assertion initially expected three events,
+not the five emitted after hosted added publication fanout. The original failure
+is preserved in `summary.json` and `connected-drive.log`; **all runtime execution
+assertions above passed before that assertion**. A corrected type-specific
+verification was then executed against actual hosted durable evidence and passed:
+exactly two publication events, two sponsoring findings events and one separate
+workspace finding across three distinct threads. The verifier also checks one
+PR, publication identity, undeployed status and no result from the revoked run.
+See `receipt-verification.json` and `hosted-receipts.json`. The driver now uses
+those explicit assertions for future fresh-fixture runs.
+
+Hosted's owner subsequently exercised its actual `runCustomerAgent` coordinator
+loop against real local Supabase with a controlled Anthropic transport. Its
+`/tmp/cyhost-1321-coordinator-evidence.json` records both sponsoring coordinators'
+result/memory acceptance, denied cross-customer source-event memory attempts,
+retained unrelated billing threads and no deployment or objective-closure claim.
+That coordinator fixture is hosted-owned; this runtime agent did not execute or
+modify it.
+
+### Installable artifact and reproducibility
+
+Complete 17-package bundle, with staged unpublished test versions and exact
+internal dependencies (not registry fallback to older Cyrus packages):
+
+```text
+/Users/agentops/.cyrus/CYPACK-1546/attachments/runtime-handoff/bundle/cyrus-0.2.72-cypack1546.269e051d4a71-test-bundle.tar.gz
+SHA256 e97592e143037a339495176eea78b0e73c627d701331f141d9d8a1533aba8de7
+```
+
+Portable credential-free handoff containing that artifact, per-package manifest,
+build/install/start instructions and scripts, installed-CLI discovery proof,
+connected driver, original log, corrected receipt validation and source hashes:
+
+```text
+/Users/agentops/.cyrus/CYPACK-1546/attachments/runtime-handoff-269e051d.tar.gz
+SHA256 7641b1cffbddcfdf192e53b32a693c942fec29ccb6b5deb3d5acc5132851dbc0
+```
+
+The handoff excludes installed state/configs and private capabilities; an exact
+fixture/control-token scan passed. Both archive hashes were reverified for this
+report. The independent owner must copy it into
+`/Users/Shared/cyrus-verifier/CYHOST-1321/`; that directory is outside this runtime
+agent's writable roots.
+
+Build prerequisites used: Node 26.5.0, npm 11.17.0, pnpm 10.33.1. Node 22/24 CI
+also passed the exact source. From a clean checkout of the source SHA, the
+included `build-local-artifact.mjs` installs the frozen lockfile, builds, packs
+the canonical graph and verifies the bundle; it never publishes. Rebuilding can
+change archive timestamps/hashes. Verify the supplied archive against its hash.
+
+```sh
+node /absolute/runtime-handoff/build-local-artifact.mjs \
+  /absolute/clean/cyrus 269e051d4a7190c46999ed38773297662dd526f3 \
+  /absolute/new-bundle-output
+# After extracting the supplied test bundle:
+bash install.sh /absolute/new-disposable-prefix
+```
+
+Required preinstalled immutable Linux arm64 Docker image:
+`sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4`
+(`oven/bun:1.3.14`, also its recorded registry digest). No image was pulled. It
+provides `/usr/bin/env`, `/bin/sh` and `/usr/local/bin/bun`; operator review must
+ensure no secrets or declared volumes. Test socket:
+`unix:///Users/agentops/.docker/run/docker.sock`; binary `/usr/local/bin/docker`.
+
+Start the installed service using the mode0600 explicit configuration described
+in `docs/customer-runtime-v1.md` and the handoff README:
+
+```sh
+/absolute/new-disposable-prefix/bin/cyrus customer-runtime --config /private/runtime/customer-runtime.json
+```
+
+Actual installed production CLI startup, Docker probe and discovery passed.
+Discovery advertises v1, `leaseRenewal:true`, `resultReconciliation:true` and
+engineering isolation; unknown contract and forged scope are denied. All 17
+consumer dependency resolutions/provenance were checked. A separate read-only
+smoke exercised actual hosted `queueEngineering` source with HTTP/database
+imports stubbed: 17 old/unsupported/unsafe discovery cases were rejected before
+queue writes, including old-runtime 404 and missing renewal/reconciliation.
+Valid discovery reached only the synthetic queue. This is controlled gate
+verification, not another live deployment.
+
+### Remaining limits and rollout
+
+No minimum published `cyrus-ai` version exists; the `-cypack1546.*` identity is
+unpublished test metadata. This proves connected controlled integration, not a
+published-hosted-head deployment, live-provider acceptance or customer outcome.
+Connected pause/policy-change/sponsor-withdrawal checks and final hosted
+checkpoint/preview acceptance remain separately owned and pending. Their existing
+unit/SQL coverage is not represented as connected runtime proof.
+
+Rollout remains: additive hosted gateway/storage with dispatch **disabled** →
+install exact scoped artifact/image and verify all v1 capabilities → joint test
+and independent exact-head review → explicit operator enablement. Unsupported
+or old runtimes stay unavailable; there is no legacy-runner/session fallback.
+Rollback disables dispatch first, fences owners, stops scoped services/reaps
+orphan containers, preserves checkpoints/receipts and reconciles uncertain
+publications. An older scoped build is eligible only if every required capability
+passes. No merge, registry publication, release or deployment was performed.
