@@ -21,6 +21,9 @@ import {
 
 const image = process.env.CYRUS_TEST_SANDBOX_IMAGE;
 const dockerHost = process.env.CYRUS_TEST_DOCKER_HOST;
+const javascriptRuntime = process.env.CYRUS_TEST_SANDBOX_RUNTIME || "bun";
+assert(javascriptRuntime === "bun" || javascriptRuntime === "node");
+const testCommand = javascriptRuntime === "node" ? "node --test" : "bun test";
 assert(
 	image && dockerHost,
 	"Set explicit local immutable image and Docker socket; no automatic pulls",
@@ -91,9 +94,10 @@ function authorization(name: string): Authorization {
 				technicalBrief: "Repair addition",
 				syntheticReproduction: "sum(2, 3) must equal 5",
 				files: {
+					"package.json": '{"type":"module"}',
 					"sum.js": "export const sum = (a,b) => a-b;",
 					"sum.test.js":
-						'import {test,expect} from "bun:test"; import {sum} from "./sum.js"; test("adds",()=>expect(sum(2,3)).toBe(5));',
+						'import {test} from "node:test"; import assert from "node:assert/strict"; import {sum} from "./sum.js"; test("adds",()=>assert.equal(sum(2,3),5));',
 				},
 			},
 		};
@@ -170,6 +174,10 @@ const gateway: ScopedGateway = {
 		if (endpoint === "engineering") {
 			assert.equal(name, "engineering");
 			assert.equal(
+				(body.files as Record<string, string>)["before-failure.txt"],
+				"retained",
+			);
+			assert.equal(
 				(body.files as Record<string, string>)["sum.js"],
 				"export const sum = (a,b) => a+b;",
 			);
@@ -221,7 +229,7 @@ const model: ScopedModel = {
 					type: "operation",
 					operation: {
 						kind: "execute",
-						command: "printf retained > before-failure.txt; bun test",
+						command: `printf retained > before-failure.txt; ${testCommand}`,
 					},
 				};
 			const commandResult =
@@ -230,18 +238,26 @@ const model: ScopedModel = {
 					: undefined;
 			if (turns === 1) {
 				assert.equal(commandResult.exitCode, 1);
-				assert(commandResult.stderr.includes("Expected: 5"));
+				assert(
+					`${commandResult.stdout}${commandResult.stderr}`.includes(
+						"AssertionError",
+					),
+				);
 			}
 			if (turns === 2) {
 				assert.equal(commandResult.exitCode, 0);
-				assert(commandResult.stderr.includes("1 pass"));
+				assert(
+					`${commandResult.stdout}${commandResult.stderr}`.includes(
+						javascriptRuntime === "node" ? "# pass 1" : "1 pass",
+					),
+				);
 			}
 			if (turns === 1)
 				return {
 					type: "operation",
 					operation: {
 						kind: "execute",
-						command: `printf 'export const sum = (a,b) => a+b;' > sum.js; bun test`,
+						command: `printf 'export const sum = (a,b) => a+b;' > sum.js; ${testCommand}`,
 					},
 				};
 			if (turns === 2)
@@ -282,9 +298,10 @@ const runtime = new ScopedRuntime({
 	revalidateMs: 25,
 	sandbox: () =>
 		new DockerSandbox({
-			dockerPath: "/usr/local/bin/docker",
+			dockerPath: process.env.CYRUS_TEST_DOCKER_PATH || "/usr/local/bin/docker",
 			dockerHost,
 			image,
+			javascriptRuntime,
 		}),
 });
 registerCustomerRuntimeRoutes(app, runtime);
