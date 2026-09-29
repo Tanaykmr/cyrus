@@ -89,3 +89,34 @@ Pairing/readiness is a setup gate. Live Codex tool/final persistence with UI rel
 both delegation paths, hosted event delivery and the final engineering workflow
 still require their own joint tests. No merge, release, production enablement or
 unrelated customer effects are authorized by this handoff.
+
+## Live Linear verification and current coverage
+
+The coordinator reports successful pairing of the f09 candidate to the feature
+preview and a connected Linear account. Before any scoped provider access, the
+coordinator must verify the actual connected account/organization, existing Cyrus
+workspace, isolated test issue permissions, and server-side customer/resource
+mapping. A connected account or an online tunnel alone does not establish these.
+Use the preview alias above and verify its deployment/head before each live test.
+Do not rotate pairing credentials again to recover configuration delivery.
+
+The fresh preview home still needs normal configuration delivery, including its
+authenticated workspace identity. This is independent of contained model
+readiness: the selected preview model is Codex/gpt-5.5, which the current contained
+adapter does not yet support. Keep both conditions visible; do not replace the
+selected model with agentops credentials or fall back to a legacy native runner.
+The earlier controlled pairing F1 pre-populates its workspace/model environment;
+it does not prove bootstrap of an empty home after leaving the browser page.
+
+Once those runtime dependencies and the coordinator's mapping checks pass, the
+live Linear gate is an operator instruction and scheduled tick reading only the
+admitted issue, followed by a relevant signed issue update waking idle work and
+an update retained during active work for the next turn. Record exact runtime and
+hosted heads, denied cross-resource requests before provider access, and persisted
+results after refresh/reconnect. No customer messaging is authorized here.
+
+Slack has no connected live test workspace/channel available. Keep its existing
+controlled/synthetic transport and event coverage separately labeled. Live Slack
+acceptance requires that connection, an isolated channel/thread and verified
+server-side mapping; its absence does not block the Linear path and is not a live
+Slack pass.
