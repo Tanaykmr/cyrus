@@ -13,6 +13,9 @@ All notable changes to this project will be documented in this file.
 - Slack and Zulip sessions no longer lose the Linear MCP server after a quiet day. Cyrus only refreshed its Linear access token when handling Linear events, so once the token was 24 hours old every chat session started with an expired token and Linear tools failed with 401. Cyrus now refreshes an expired token before each chat session starts. ([#1501](https://github.com/cyrusagents/cyrus/pull/1501))
 - Linear webhooks from all twelve published outbound IP addresses are now accepted, preventing missed events as Linear rolls out new source addresses. ([CYPACK-1518](https://linear.app/ceedar/issue/CYPACK-1518), [#1481](https://github.com/cyrusagents/cyrus/pull/1481))
 
+### Security
+- Updated the MCP SDK dependency graph to resolve patched `ip-address` releases, closing two moderate SSRF and trust-boundary advisories while removing the now-redundant MCP SDK and `ip-address` overrides. ([CYPACK-1549](https://linear.app/ceedar/issue/CYPACK-1549/run-a-release), [#1510](https://github.com/cyrusagents/cyrus/pull/1510))
+
 ### Packages
 
 #### cyrus-cloudflare-tunnel-client
@@ -64,7 +67,7 @@ All notable changes to this project will be documented in this file.
 - cyrus-edge-worker@0.2.73
 
 #### cyrus-ai
-- cyrus-ai@0.2.73 ([CYPACK-1549](https://linear.app/ceedar/issue/CYPACK-1549/run-a-release))
+- cyrus-ai@0.2.73 ([CYPACK-1549](https://linear.app/ceedar/issue/CYPACK-1549/run-a-release), [#1510](https://github.com/cyrusagents/cyrus/pull/1510))
 
 ## [0.2.72] - 2026-09-15
 
