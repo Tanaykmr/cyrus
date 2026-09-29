@@ -56,6 +56,32 @@ export class DurableCyrusSessionSink implements ICyrusSessionSink {
 	}
 	async createCyrusSession(descriptor: CyrusSessionDescriptor): Promise<void> {
 		this.assertPrivateIdentity(descriptor);
+		// A child uses its own private journal. The hosted creation receipt, checked
+		// under current child authority, establishes its already-admitted parent;
+		// never read or import a parent's private checkpoint to establish linkage.
+		if (
+			descriptor.parentSessionId &&
+			!this.journal.isCreated(descriptor.parentSessionId) &&
+			!this.journal.isCreated(descriptor.id)
+		) {
+			const item = {
+				sessionId: descriptor.id,
+				sequence: 1,
+				kind: "session" as const,
+				payload: descriptor,
+			};
+			const authority = await this.authority(descriptor.id);
+			const ack = verifySessionDeliveryAck(
+				await this.transport.deliver(
+					{ ...authority, item },
+					AbortSignal.timeout(20_000),
+				),
+				item,
+			);
+			this.journal.create(descriptor, true);
+			this.journal.acknowledge(item, ack);
+			return;
+		}
 		const item = this.journal.create(descriptor);
 		if (this.journal.isCreated(descriptor.id)) {
 			// Persisted creation is identity, not current authority on reconnect.

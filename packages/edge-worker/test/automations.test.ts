@@ -456,7 +456,7 @@ it("reports the selected Codex model without borrowing Claude aliases or claimin
 		});
 		expect(capabilities.available).toBe(false);
 		expect(capabilities.reason).toBe(
-			"Configured harness has no contained automation adapter",
+			"Contained Codex image has not been configured and verified",
 		);
 	} finally {
 		await app.close();
@@ -656,10 +656,33 @@ it("bounds receipt retries independently and does not resurrect them on definiti
 	expect(db.claim(2, false)).toEqual([]);
 });
 
-it("flushes immutable session receipts before completion and replays a lost result ACK without reopening tools/model", async () => {
+it.each([
+	"root",
+	"direct",
+	"ticket",
+])("flushes immutable session receipts before completion and replays a lost result ACK without reopening tools/model: %s", async (kind) => {
 	let now = Date.now();
 	const db = await ledger(() => now);
-	const d = definition();
+	const d = definition(
+		kind === "root"
+			? {}
+			: {
+					role: "investigator",
+					session: {
+						id: "assignment:12345678-1234-4123-8123-123456789abc",
+						parentSessionId: "parent-session",
+						scopeRef: "operations-review",
+						role: "investigator",
+						...(kind === "ticket" && {
+							issueContext: {
+								trackerId: "linear",
+								issueId: "issue-1",
+								issueIdentifier: "TEST-1",
+							},
+						}),
+					},
+				},
+	);
 	db.upsert(d);
 	const occurrence = db.enqueue(d.id, 1, "session-event", "Review");
 	const { sessionDeliveryDigest } = await import(
@@ -740,7 +763,13 @@ it("flushes immutable session receipts before completion and replays a lost resu
 				if (endpoint === "authorize")
 					return {
 						authority: authority({
-							definition: { ...d, grants: authority().definition.grants },
+							definition: {
+								...d,
+								grants: authority().definition.grants.map((g) => ({
+									...g,
+									permissions: ["read"],
+								})),
+							},
 							occurrenceId: occurrence.id,
 							attemptId: String(body.attemptId),
 							fence: Number(body.fence),
@@ -756,7 +785,7 @@ it("flushes immutable session receipts before completion and replays a lost resu
 						sessionDelivery: {
 							contractVersion: 1,
 							path: "/api/agent-sessions/v1/deliver",
-							session: {
+							session: d.session ?? {
 								id: "session-root",
 								scopeRef: d.scopeRef,
 								role: d.role,
@@ -807,4 +836,240 @@ it("flushes immutable session receipts before completion and replays a lost resu
 		new Set(deliveries.filter((d) => d.sequence === 1).map((d) => d.attempt))
 			.size,
 	).toBe(3);
+});
+
+it.skipIf(!process.env.CYRUS_TEST_CODEX_IMAGE)(
+	"negotiates configured Codex readiness only after private login and actual isolated app-server initialization",
+	async () => {
+		const auth = await directory();
+		await writeFile(
+			join(auth, "auth.json"),
+			JSON.stringify({
+				tokens: {
+					access_token: "synthetic-private-login",
+					account_id: "synthetic-account",
+				},
+			}),
+			{ mode: 0o600 },
+		);
+		vi.stubEnv("CODEX_HOME", auth);
+		vi.stubEnv("CYRUS_TEAM_ID", "workspace-a");
+		vi.stubEnv("CYRUS_API_KEY", "supervisor-fixture");
+		vi.stubEnv("CYRUS_APP_URL", "https://hosted.fixture");
+		vi.stubEnv("CYRUS_DEFAULT_RUNNER", "");
+		vi.stubEnv("CYRUS_DEFAULT_MODEL", "");
+		vi.stubEnv("CYRUS_CODEX_DEFAULT_MODEL", "");
+		vi.stubEnv(
+			"CYRUS_CONTAINED_CODEX_IMAGE",
+			process.env.CYRUS_TEST_CODEX_IMAGE!,
+		);
+		vi.stubEnv(
+			"CYRUS_CONTAINED_DOCKER_PATH",
+			process.env.CYRUS_TEST_DOCKER_PATH || "/usr/local/bin/docker",
+		);
+		vi.stubEnv("CYRUS_CONTAINED_DOCKER_HOST", "unix:///var/run/docker.sock");
+		const app = Fastify();
+		registerConfiguredAutomations(app, await directory(), () => ({
+			defaultRunner: "codex",
+			codexDefaultModel: "gpt-5.5",
+			claudeDefaultModel: "opus",
+		}));
+		try {
+			await app.ready();
+			const result = await app.inject({
+				url: "/api/automations/v1/capabilities",
+				headers: { authorization: "Bearer supervisor-fixture" },
+			});
+			expect(result.statusCode).toBe(200);
+			expect(result.json()).toMatchObject({
+				available: true,
+				target: {
+					harness: "codex",
+					model: "gpt-5.5",
+					adapter: "codex-app-server-contained-v1",
+				},
+				minimumPublishedVersion: null,
+			});
+		} finally {
+			await app.close();
+		}
+	},
+);
+
+it.each([
+	"parent",
+	"role",
+	"scope",
+	"write",
+	"ticket",
+	"external",
+	"schedule",
+	"id",
+])("denies an invalid admitted child before model, MCP or session delivery: %s", async (kind) => {
+	const db = await ledger();
+	const session = {
+		id: "assignment:12345678-1234-4123-8123-123456789abc",
+		parentSessionId: "parent",
+		scopeRef: "operations-review",
+		role: "investigator" as const,
+	};
+	const d = definition({ role: "investigator", session });
+	if (kind === "parent") delete (session as any).parentSessionId;
+	if (kind === "role") (session as any).role = "coordinator";
+	if (kind === "scope") session.scopeRef = "foreign-customer";
+	if (kind === "external")
+		(session as any).externalSessionId = "borrowed-linear-session";
+	if (kind === "schedule")
+		d.schedule = {
+			intervalSeconds: 60,
+			anchorAt: new Date(Date.now() + 60000).toISOString(),
+			timezone: "UTC",
+		};
+	if (kind === "id") session.id = "self-selected";
+	db.upsert(d);
+	const occurrence = db.enqueue(d.id, 1, "child-event", "investigate");
+	const next = vi.fn(),
+		call = vi.fn(),
+		deliver = vi.fn();
+	const runtime = new AutomationRuntime({
+		workspaceId: () => d.workspaceId,
+		ledger: db,
+		store: new AutomationCheckpointStore(await directory()),
+		readiness: () => ({ ...d.target, reason: null }),
+		model: { next },
+		sessions: {
+			directory: await directory(),
+			secrets: () => [],
+			transport: { deliver },
+		},
+		tools: () => ({
+			call,
+			async close() {},
+			async renew(fn) {
+				await fn();
+			},
+		}),
+		gateway: {
+			async call(endpoint, body) {
+				if (endpoint !== "authorize") throw Error("No effect expected");
+				return {
+					authority: authority({
+						definition: {
+							...d,
+							grants: authority().definition.grants.map((g) => ({
+								...g,
+								permissions: kind === "write" ? ["read", "write"] : ["read"],
+							})),
+						},
+						occurrenceId: occurrence.id,
+						attemptId: String(body.attemptId),
+						fence: Number(body.fence),
+						input: occurrence.input,
+					}),
+					mcp: {
+						token: "synthetic-long-credential-not-a-secret",
+						audience: "/mcp",
+						expiresAt: new Date(Date.now() + 60000).toISOString(),
+						grantId: "bound-grant",
+					},
+					sessionDelivery: {
+						contractVersion: 1,
+						path: "/api/agent-sessions/v1/deliver",
+						session: {
+							...session,
+							...(kind === "ticket" && {
+								issueContext: {
+									trackerId: "linear",
+									issueId: "unadmitted-issue",
+									issueIdentifier: "BAD-1",
+								},
+							}),
+						},
+					},
+				};
+			},
+		},
+	});
+	try {
+		await runtime.wake();
+		expect(next).not.toHaveBeenCalled();
+		expect(call).not.toHaveBeenCalled();
+		expect(deliver).not.toHaveBeenCalled();
+	} finally {
+		await runtime.stop();
+	}
+});
+
+it("keeps one write identity when native reconnect or repeated model calls repeat the same approved payload", async () => {
+	const db = await ledger();
+	const d = definition();
+	db.upsert(d);
+	const occurrence = db.enqueue(d.id, 1, "write-event", "approved reply");
+	const keys: string[] = [];
+	let models = 0;
+	const runtime = new AutomationRuntime({
+		workspaceId: () => d.workspaceId,
+		ledger: db,
+		store: new AutomationCheckpointStore(await directory()),
+		readiness: () => ({ ...d.target, reason: null }),
+		model: {
+			async next() {
+				return ++models <= 2
+					? {
+							type: "tool",
+							call: {
+								name: "add_comment",
+								arguments: { text: "same approved text" },
+							},
+						}
+					: { type: "result", text: "receipt accepted" };
+			},
+		},
+		tools: () => ({
+			async call(_call, key) {
+				keys.push(key);
+				return { items: [{ text: "immutable receipt" }], nextCursor: null };
+			},
+			async close() {},
+			async renew(fn) {
+				await fn();
+			},
+		}),
+		gateway: {
+			async call(endpoint, body) {
+				if (endpoint === "authorize")
+					return {
+						authority: authority({
+							definition: { ...d, grants: authority().definition.grants },
+							occurrenceId: occurrence.id,
+							attemptId: String(body.attemptId),
+							fence: Number(body.fence),
+							input: occurrence.input,
+						}),
+						mcp: {
+							token: "synthetic-long-credential-not-a-secret",
+							audience: "/mcp",
+							expiresAt: new Date(Date.now() + 60000).toISOString(),
+							grantId: "bound-grant",
+						},
+					};
+				if (endpoint === "result")
+					return {
+						contractVersion: 1,
+						acknowledged: true,
+						occurrenceId: body.occurrenceId,
+						idempotencyKey: body.idempotencyKey,
+					};
+				return {};
+			},
+		},
+	});
+	try {
+		await runtime.wake();
+		expect(db.status(d.id).occurrences[0]?.status).toBe("completed");
+		expect(keys).toHaveLength(2);
+		expect(keys[0]).toBe(keys[1]);
+	} finally {
+		await runtime.stop();
+	}
 });

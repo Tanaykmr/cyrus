@@ -6,7 +6,8 @@ current-authority checks, contained MCP connections or terminal receipt recovery
 Hosted accepted the delivery path/envelope in coordination comment
 `d15d1384-5393-4440-ada6-2217d57c63c8`. Shared exported types and strict validators
 now live in `packages/edge-worker/src/sinks/session-delivery.ts`. Registered automations negotiate and use this transport as described below; native
-harness and child execution acceptance remains open. The bounded signal
+Codex and investigator child execution now have controlled native-container coverage;
+joint live model/hosted UI acceptance remains open. The bounded signal
 metadata subset below was accepted in comment `3f8623c3-609a-4199-9e9e-31f549be1b47`.
 
 ## Identity and delegation
@@ -44,7 +45,7 @@ grant native tools, or by itself implement hosted authorization or durability.
 | Harness | Normalized events already present | Persistence limitations |
 | --- | --- | --- |
 | Claude | SDK messages, tool use/result, final result/error through AgentSessionManager | Optional `HttpSessionStore` mirrors SDK-native entries to hosted `claude_session_entries`; this is not the normalized session/activity timeline. |
-| Codex | SDK/app-server backends normalize thread, item start/completion, turn completion/failure; `CodexEventMapper` emits tool use/result and terminal messages | Native thread identity and local Cyrus state exist; no equivalent hosted normalized replay adapter is wired. Reasoning items are not used to fabricate timeline content. |
+| Codex | SDK/app-server backends normalize thread, item start/completion, turn completion/failure; `CodexEventMapper` emits tool use/result and terminal messages | Contained registered Codex persists its private native rollout and emits source-keyed tool start/result, final response and native lifecycle identity through the durable sink. Reasoning items are not used to fabricate timeline content. |
 | Gemini | `geminiEventToSDKMessage` maps tool use/result and success/error; runner accumulates text deltas before normalized delivery | Existing formatter/adapter tests are not hosted persistence or live-session evidence. |
 | Cursor | SDK tool_call plus assistant/user blocks map tool use/result; status and exposed thinking have existing handlers; runner produces terminal outcomes | Coverage concerns emitted SDK content only, not inaccessible reasoning. No hosted ordered acknowledgement/replay wired. |
 | OpenCode | step_start, tool_use, text, step_finish map init, tool lifecycle and result; runtime failure path emits error outcome | Existing replay/manager tests cover mappings, not a real hosted resumed session. |
@@ -119,7 +120,8 @@ the same activity/session relationship and require durable idempotent handoff.
 file selected by the authenticated operating workspace and namespace. Its
 transactions allocate contiguous per-session sequences and remove pending items
 only after a matching digest/sequence acknowledgement. Parent creation must be
-acknowledged before local child creation. An unacknowledged session cannot emit
+acknowledged before local child creation. Separate child journals use the current
+hosted parent-link creation ACK, without opening the parent journal. An unacknowledged session cannot emit
 activities. A denied session does not prevent delivery for another admitted
 session; order remains strict within each session. The journal holds at most512
 session identities,1024 pending items and16MiB; exhaustion fails closed. Automatic
@@ -145,10 +147,10 @@ Owned children never call the legacy parent-resume callback: that callback may
 launch an unscoped runner. Child response plus terminal lifecycle and the admitted
 parent relationship provide the persisted result; hosted must wake the parent via
 its authorized binding/outbox into the same generic runtime occurrence ledger.
-That parent wakeup remains to be integrated. Registered root occurrences now flush
-their journal on reconnect and before result completion. Likewise,
-native harness stream re-emission needs a stable source-event cursor/dedup policy;
-transport retry idempotency alone does not prove native-session resume coverage.
+Hosted owns that parent wakeup. Registered root and investigator child occurrences flush
+their journal on reconnect and before result completion. Native dynamic-tool requests and durable operation results use stable runtime
+operation/source keys across private native rollout recovery. Other native built-in
+tool timelines and full engineering execution remain separate coverage gaps.
 
 The production classes are tested together over actual HTTP with a controlled
 receiver and SQLite, including normalizer replay, missing ACK, changed attempt,
@@ -158,7 +160,9 @@ those tests. Registered root execution now negotiates the agreed optional
 `sessionDelivery` field using `X-Cyrus-Session-Delivery: 1`, pins its descriptor in
 checkpoints, emits stable step-keyed normalized actions/results/lifecycle, and
 requires exact final ACKs before `/result`. The new registered F1 is controlled
-transport evidence; actual hosted SQL/UI and native Codex remain separate gates.
+transport evidence. The native Codex variant now executes real app-server processes
+in Docker with synthetic model Responses and real SDK MCP. Actual hosted SQL/UI
+and the existing live ChatGPT connection remain separate gates.
 
 ## Acceptance still required
 

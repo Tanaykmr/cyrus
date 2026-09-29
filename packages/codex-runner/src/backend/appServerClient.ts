@@ -44,6 +44,8 @@ export interface AppServerClientOptions {
 	 * the session forever. Defaults to 60s. Set to 0 to disable.
 	 */
 	requestTimeoutMs?: number;
+	/** Bound untrusted contained-process output, including unterminated frames. */
+	maxOutputBytes?: number;
 }
 
 /**
@@ -126,6 +128,20 @@ export class AppServerClient extends EventEmitter {
 			this.emit("exit", code, signal);
 		});
 
+		if (this.options.maxOutputBytes !== undefined) {
+			let bytes = 0;
+			const account = (chunk: Buffer) => {
+				bytes += chunk.length;
+				if (bytes > this.options.maxOutputBytes!) {
+					this.failAllPending(new Error("App-server output limit exceeded"));
+					this.rl?.close();
+					void this.close();
+					this.emit("error", new Error("App-server output limit exceeded"));
+				}
+			};
+			child.stdout.on("data", account);
+			child.stderr.on("data", account);
+		}
 		child.stderr.on("data", (data: Buffer) => {
 			const text = data.toString().trim();
 			if (text) {

@@ -66,6 +66,7 @@ export const definitionSchema = z
 			})
 			.strict(),
 		grants: z.array(grantSchema).max(1),
+		session: cyrusSessionDescriptorSchema.optional(),
 	})
 	.strict();
 export type AutomationDefinition = z.infer<typeof definitionSchema>;

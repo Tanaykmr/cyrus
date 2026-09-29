@@ -213,14 +213,14 @@ credential brokerage and existing Linear/Slack signature verification remain Hos
 
 ## Containment and configured model readiness
 
-First supported target is configured harness `claude` with an explicit `claude-*`
+The Messages target is configured harness `claude` with an explicit `claude-*`
 Anthropic model ID and the runtime's existing ANTHROPIC_API_KEY connection. Discovery
 explicitly names adapter `anthropic-messages-contained-v1`; this is not a claim of
-Claude Code OAuth/Codex login equivalence. OAuth, other harnesses, aliases and missing
-keys report unavailable, never silently select a provider/model or accept global
+Claude Code OAuth equivalence. Claude OAuth, unsupported harnesses, aliases and missing
+connections report unavailable, never silently select a provider/model or accept global
 customer-feature keys. No model call occurs merely from registration/discovery.
 
-The model receives scoped messages and strict JSON tool choices only. No native
+For the Messages adapter, the model receives scoped messages and strict JSON tool choices only. No native
 subprocess, filesystem, shell, network, connector, config/plugin loader, auto-memory,
 SDK session or model-provided credential exists in this interpreter. Supervisor model
 transport is fixed Anthropic Messages; MCP transport is fixed Hosted /mcp. Private
@@ -262,8 +262,8 @@ runtime transmits `/result`; lost result ACK recovery replays only identical rec
 and the immutable result, never the model, tools or progress. Display fields use the
 shared 32,768-character bound; credentials are redacted before journal persistence.
 The bounded journal fails closed when full. It is transport storage, not a scheduler.
-Child descriptors remain unavailable until separate server-admitted child binding
-support is integrated; neither a parent ID nor role in model text grants execution.
+Child descriptors require the separate server-admitted binding described below;
+neither a parent ID nor role in model text grants execution.
 
 New paired auth responses may include authenticated `config.teamId`. Pending launch
 then GETs `/api/config/runtime` with the existing paired API key/team header before
@@ -273,3 +273,55 @@ files with a recovery marker. No scope, tunnel token, API key or origin may be
 replaced by bootstrap. Existing configured/unpaired workflows retain their behavior;
 old paired installs lacking team ID still need the existing authenticated config
 push once. Bootstrap configuration is not proof of contained harness readiness.
+
+### Contained Codex and admitted child sessions
+
+The registered handler also supports `codex-app-server-contained-v1` for an
+explicit configured Codex model (tested `gpt-5.5`). It runs the reviewed native
+Codex 0.153.3 app-server in a dedicated immutable Linux image. The same-user
+supervisor brokers the existing private `CODEX_HOME/auth.json` ChatGPT login to
+the fixed Codex Responses endpoint; the container never receives login, pairing,
+MCP, or provider credentials. Native `account/read` owns login refresh. API-key
+substitution and an uncontained CLI fallback are unsupported.
+
+Set `CYRUS_CONTAINED_CODEX_IMAGE` to a preloaded `sha256:` image ID and
+`CYRUS_CONTAINED_DOCKER_HOST` to the same user's local Unix socket. Optional
+`CYRUS_CONTAINED_DOCKER_PATH` is an absolute binary path (default `/usr/bin/docker`
+on Linux, `/usr/local/bin/docker` on macOS). Startup probes the private login and
+actual isolated app-server before advertising readiness; missing image/socket,
+image-declared volumes, incompatible protocol, or unavailable login fail closed.
+The image has no host mounts, networking, inherited environment, broad MCP, user
+plugins, or shared home. It uses a read-only root, private bounded tmpfs, dropped
+capabilities, no-new-privileges and CPU/memory/process limits. Native shell,
+goals, apps, plugins, hooks, browser/computer, image generation, memory import and
+agent spawning are disabled. Built-in patch/image tools can only reach the
+container's private filesystem; they confer no repository/deployment authority.
+
+Native rollout bytes and native identity are stored only inside the existing
+scope-keyed checkpoint. Recovery restores only that rollout into a fresh empty
+container, revalidates current authority, and starts a continuation turn of the
+same native session. A captured pending dynamic-tool request is reconciled before
+another model call. An interrupted turn's completed tool output is supplied from
+the durable operation receipt. Repeated identical write payloads in one occurrence
+retain one operation identity across native call IDs; they cannot create a second
+write on reconnect. Terminal receipt recovery never starts the harness. Native
+identity is a lifecycle association, distinct from the Cyrus session ID.
+
+A server-admitted child definition includes optional `session` using the shared
+`CyrusSessionDescriptor`: stable `assignment:<UUID>` ID, mandatory parentSessionId,
+matching scopeRef/role, no externalSessionId, and schedule:null. Direct children
+omit issueContext. Ticket-backed children carry the server-verified optional
+issueContext. Both are separate definitions/occurrences in the same ledger, with
+separate private checkpoints/journals and narrower read grants. The exact descriptor
+must match current authorize/sessionDelivery and all subsequent renewals. The
+hosted creation ACK establishes the admitted parent link before the child's
+private journal accepts activities; the runtime never opens the parent's journal
+to establish that link. Findings finish the child's own result ledger; hosted
+routes them back to the parent. No Linear session or ticket is manufactured for a
+direct child. Engineering remains unavailable until separate repository/head and
+publication authority is integrated; this adapter does not grant it.
+
+Controlled F1 now covers this native path, including direct/ticket descriptors,
+real SDK MCP, instruction/tick/event delivery, reconnect and terminal ACK replay.
+Live ChatGPT login/model transport, hosted SQL/UI reload and real assigned-ticket
+verification remain separate joint gates. No minimum published version exists.

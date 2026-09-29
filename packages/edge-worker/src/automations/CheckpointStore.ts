@@ -3,7 +3,11 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
-import { admissionSchema, modelStepSchema } from "./contract.js";
+import {
+	admissionSchema,
+	modelStepSchema,
+	toolCallSchema,
+} from "./contract.js";
 
 export const messageSchema = z
 	.object({
@@ -36,6 +40,20 @@ export const checkpointSchema = z
 			.optional(),
 		status: z.enum(["running", "completed"]),
 		sessionDelivery: admissionSchema.shape.sessionDelivery,
+		native: z
+			.object({
+				threadId: z.string().uuid(),
+				rollout: z.string().max(2700000),
+				tool: z
+					.object({
+						sequence: z.number().int().min(0).max(24),
+						call: toolCallSchema,
+					})
+					.strict()
+					.optional(),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict();
 export type AutomationCheckpoint = z.infer<typeof checkpointSchema>;

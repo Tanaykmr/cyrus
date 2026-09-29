@@ -1,12 +1,18 @@
 import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
+import { CodexLoginBroker, ContainedCodexProcess } from "cyrus-codex-runner";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { HttpSessionDeliveryTransport } from "../sinks/SessionDeliveryTransport.js";
 import { AutomationRuntime } from "./AutomationRuntime.js";
 import { AutomationCheckpointStore } from "./CheckpointStore.js";
-import { registrationSchema } from "./contract.js";
+import { ContainedCodexAutomationModel } from "./ContainedCodexModel.js";
+import {
+	checkpointKey,
+	permittedToolNames,
+	registrationSchema,
+} from "./contract.js";
 import { type AutomationGateway, AutomationHttpGateway } from "./Gateway.js";
 import { AutomationLedger } from "./Ledger.js";
 import {
@@ -223,6 +229,66 @@ export function registerConfiguredAutomations(
 			gatewayError = "Private durable automation storage is unavailable";
 		}
 	}
+	const codexConfig = {
+		image: process.env.CYRUS_CONTAINED_CODEX_IMAGE || "",
+		dockerPath:
+			process.env.CYRUS_CONTAINED_DOCKER_PATH ||
+			(process.platform === "darwin"
+				? "/usr/local/bin/docker"
+				: "/usr/bin/docker"),
+		dockerHost:
+			process.env.CYRUS_CONTAINED_DOCKER_HOST || "unix:///var/run/docker.sock",
+	};
+	let codexReason: string | null =
+		"Contained Codex image has not been configured and verified";
+	let broker: CodexLoginBroker | undefined;
+	try {
+		broker = new CodexLoginBroker();
+	} catch {
+		codexReason = "Codex login home must be an absolute private path";
+	}
+	const codexModel = new ContainedCodexAutomationModel(
+		codexConfig,
+		(request, context) => {
+			if (!broker) throw new Error("Codex login broker unavailable");
+			return broker.respond(
+				request,
+				{
+					model: context.authority().definition.target.model,
+					scopeKey: checkpointKey(context.authority()),
+					toolNames: permittedToolNames(context.authority()),
+					authorize: context.authorize,
+				},
+				context.signal,
+			);
+		},
+	);
+	const messagesModel = new ConfiguredAutomationMessagesModel(configuration);
+	app.addHook("onReady", async () => {
+		if (configuration().harness !== "codex" || !codexConfig.image || !broker)
+			return;
+		let probe: ContainedCodexProcess | undefined;
+		try {
+			codexReason = await broker.readiness();
+			if (codexReason) return;
+			probe = new ContainedCodexProcess(codexConfig);
+			await probe.start({
+				signal: AbortSignal.timeout(15000),
+				notification() {},
+				async model() {
+					throw new Error("Readiness cannot call a model");
+				},
+				async request() {
+					throw new Error("Readiness cannot call tools");
+				},
+			});
+			codexReason = null;
+		} catch {
+			codexReason = "Contained Codex image or isolation runtime is unavailable";
+		} finally {
+			await probe?.close();
+		}
+	});
 	const runtime = new AutomationRuntime({
 		workspaceId: () => pairedWorkspace,
 		gateway,
@@ -248,7 +314,19 @@ export function registerConfiguredAutomations(
 			}),
 		tools: (authority, credential, signal) =>
 			new ScopedAutomationMcpClient(origin, authority, credential, signal),
-		model: new ConfiguredAutomationMessagesModel(configuration),
+		model: {
+			async next(messages, authority, signal) {
+				return messagesModel.next(messages, authority, signal);
+			},
+			async open(context) {
+				if (configuration().harness === "codex") {
+					if (codexReason || !broker || (await broker.readiness()))
+						throw new Error("Contained Codex unavailable");
+					return codexModel.open(context);
+				}
+				return messagesModel;
+			},
+		},
 		store: new AutomationCheckpointStore(
 			join(cyrusHome, "automation-checkpoints-v1"),
 		),
@@ -264,7 +342,20 @@ export function registerConfiguredAutomations(
 				harness: config.harness,
 				model: config.model,
 				controlReason,
-				reason: controlReason || modelReadiness(config),
+				adapter:
+					config.harness === "codex" && !codexReason
+						? ("codex-app-server-contained-v1" as const)
+						: config.harness === "claude"
+							? ("anthropic-messages-contained-v1" as const)
+							: null,
+				reason:
+					controlReason ||
+					(config.harness === "codex"
+						? codexReason ||
+							(!/^gpt-[a-zA-Z0-9._-]+$/.test(config.model)
+								? "Configure an explicit Codex model ID"
+								: null)
+						: modelReadiness(config)),
 			};
 		},
 	});

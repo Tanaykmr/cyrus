@@ -45,6 +45,10 @@ export interface AutomationRuntimeOptions {
 		controlReason?: string | null;
 		harness: string;
 		model: string;
+		adapter?:
+			| "anthropic-messages-contained-v1"
+			| "codex-app-server-contained-v1"
+			| null;
 	};
 	sessions?: {
 		directory: string;
@@ -82,9 +86,10 @@ export class AutomationRuntime {
 				harness: configured.harness,
 				model: configured.model,
 				adapter:
-					configured.harness === "claude"
+					configured.adapter ??
+					(configured.harness === "claude"
 						? "anthropic-messages-contained-v1"
-						: null,
+						: null),
 			},
 			capabilities: {
 				automations: true,
@@ -205,15 +210,37 @@ export class AutomationRuntime {
 			),
 		);
 		const next = admission.authority;
+		const child = next.definition.session;
+		if (
+			child &&
+			(!/^assignment:[a-f0-9-]{36}$/i.test(child.id) ||
+				!z.string().uuid().safeParse(child.id.slice(11)).success ||
+				!child.parentSessionId ||
+				child.externalSessionId ||
+				next.definition.schedule !== null ||
+				child.role === "coordinator" ||
+				child.scopeRef !== next.definition.scopeRef ||
+				child.role !== next.definition.role ||
+				next.definition.grants.some((grant) =>
+					grant.permissions.includes("write"),
+				))
+		)
+			throw new Error("Child assignment scope mismatch");
+		if (child && !admission.sessionDelivery)
+			throw new Error("Child session delivery is required");
 		if (admission.sessionDelivery) {
 			const session = admission.sessionDelivery.session;
 			if (
 				!this.options.sessions ||
 				session.scopeRef !== next.definition.scopeRef ||
 				session.role !== next.definition.role ||
-				session.parentSessionId ||
-				session.issueContext ||
-				session.externalSessionId
+				(child
+					? digest(child) !== digest(session)
+					: !!(
+							session.parentSessionId ||
+							session.issueContext ||
+							session.externalSessionId
+						))
 			)
 				throw new Error("Session delivery admission mismatch");
 		}
@@ -270,6 +297,7 @@ export class AutomationRuntime {
 		let receiptOnly = !!occurrence.receipt;
 		let journal: SessionActivityJournal | undefined;
 		let sink: DurableCyrusSessionSink | undefined;
+		let model: AutomationModel | undefined;
 		const session = admission.sessionDelivery?.session;
 
 		const tools = this.options.tools(
@@ -407,16 +435,39 @@ export class AutomationRuntime {
 				if (!state.pending) {
 					if (state.sequence >= AUTOMATION_LIMITS.maxSteps)
 						throw new Error("Automation step limit exceeded");
+					model ??= this.options.model.open
+						? await this.options.model.open({
+								state,
+								authority: () => authority,
+								authorize: fresh,
+								save: () => this.options.store.save(state!),
+								signal: controller.signal,
+								nativeIdentity: async (id) => {
+									if (sink && session)
+										await sink.updateCyrusSession(
+											session.id,
+											{
+												status: AgentSessionStatus.Active,
+												harness: { type: "codex", sessionId: id },
+											},
+											`native:${id}`,
+										);
+								},
+							})
+						: this.options.model;
 					const step = modelStepSchema.parse(
-						await this.options.model.next(
-							state.messages,
-							authority,
-							controller.signal,
-						),
+						await model.next(state.messages, authority, controller.signal),
 					);
 					await fresh();
 					if (step.type === "tool") authorizeTool(authority, step.call);
-					state.pending = { key: digest([key, state.sequence, step]), step };
+					// One approved write payload has one operation identity throughout an
+					// occurrence, including native reconnect/new call IDs.
+					const position =
+						step.type === "tool" &&
+						["reply", "add_comment"].includes(step.call.name)
+							? "write"
+							: state.sequence;
+					state.pending = { key: digest([key, position, step]), step };
 					await this.options.store.save(state);
 				}
 				if (state.pending.step.type === "result") {
@@ -440,7 +491,11 @@ export class AutomationRuntime {
 			clearTimeout(leaseTimer);
 			clearInterval(poll);
 			try {
-				await tools.close();
+				try {
+					await model?.close?.();
+				} finally {
+					await tools.close();
+				}
 			} finally {
 				journal?.close();
 				this.active.delete(key);

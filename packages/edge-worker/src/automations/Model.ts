@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { readBoundedJson } from "../customer-runtime/Gateway.js";
-import type { AutomationMessage } from "./CheckpointStore.js";
+import type {
+	AutomationCheckpoint,
+	AutomationMessage,
+} from "./CheckpointStore.js";
 import {
 	type AutomationAuthority,
 	type AutomationStep,
@@ -9,7 +12,17 @@ import {
 	toolCallSchema,
 } from "./contract.js";
 
+export interface AutomationModelContext {
+	state: AutomationCheckpoint;
+	authority: () => AutomationAuthority;
+	authorize: () => Promise<void>;
+	save: () => Promise<void>;
+	nativeIdentity: (id: string) => Promise<void>;
+	signal: AbortSignal;
+}
 export interface AutomationModel {
+	open?(context: AutomationModelContext): Promise<AutomationModel>;
+	close?(): Promise<void>;
 	next(
 		messages: AutomationMessage[],
 		authority: AutomationAuthority,

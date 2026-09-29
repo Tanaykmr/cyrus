@@ -141,7 +141,10 @@ export class SessionActivityJournal {
 			throw error;
 		}
 	}
-	create(descriptor: CyrusSessionDescriptor): SessionDeliveryItem {
+	create(
+		descriptor: CyrusSessionDescriptor,
+		remoteParentAcknowledged = false,
+	): SessionDeliveryItem {
 		const item = parseSessionDeliveryItem({
 			sessionId: descriptor.id,
 			sequence: 1,
@@ -162,6 +165,7 @@ export class SessionActivityJournal {
 			}
 			if (
 				descriptor.parentSessionId &&
+				!remoteParentAcknowledged &&
 				!state.sessions.some(
 					(s) =>
 						s.descriptor.id === descriptor.parentSessionId &&

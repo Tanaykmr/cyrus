@@ -1,7 +1,7 @@
 // Controlled transports only. Production runtime, SQLite, Messages adapter and MCP SDK.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,7 +37,6 @@ const {
 const { z } = require("zod");
 const supervisorKey = "f1-supervisor-not-a-live-credential";
 const modelKey = "f1-model-not-a-live-credential";
-const target = { harness: "claude", model: "claude-fixture" };
 
 async function until(predicate, timeout = 10000) {
 	const end = Date.now() + timeout;
@@ -46,7 +45,12 @@ async function until(predicate, timeout = 10000) {
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 }
-export async function runAutomationDrive() {
+export async function runAutomationDrive({
+	codexImage = process.env.CYRUS_F1_CODEX_IMAGE,
+} = {}) {
+	const target = codexImage
+		? { harness: "codex", model: "gpt-5.5" }
+		: { harness: "claude", model: "claude-fixture" };
 	const directory = await mkdtemp(join(tmpdir(), "cyrus-automation-f1-"));
 	const checkpoints = join(directory, "checkpoints");
 	const definitions = new Map(),
@@ -177,7 +181,7 @@ export async function runAutomationDrive() {
 					sessionDelivery: {
 						contractVersion: 1,
 						path: "/api/agent-sessions/v1/deliver",
-						session: {
+						session: d.session ?? {
 							id: `automation:${d.id}:${b.occurrenceId}`,
 							scopeRef: d.scopeRef,
 							role: d.role,
@@ -200,9 +204,10 @@ export async function runAutomationDrive() {
 			counts.resultTransmissions++;
 			const sessionItems = [...activityReceipts.values()].filter(
 				(entry) =>
-					entry.item.sessionId === `automation:${d.id}:${b.occurrenceId}`,
+					entry.item.sessionId ===
+					(d.session?.id ?? `automation:${d.id}:${b.occurrenceId}`),
 			);
-			assert.equal(sessionItems.length, 6);
+			assert.equal(sessionItems.length, codexImage ? 7 : 6);
 			assert.equal(sessionItems.at(-1).item.payload.status, "complete");
 			const previous = results.get(b.occurrenceId);
 			if (previous) assert.equal(previous.key, b.idempotencyKey);
@@ -251,13 +256,19 @@ export async function runAutomationDrive() {
 		if (!current) return denied(reply);
 		const d = current.authority.definition;
 		const item = envelope.item;
-		assert.equal(item.sessionId, `automation:${d.id}:${envelope.occurrenceId}`);
+		assert.equal(
+			item.sessionId,
+			d.session?.id ?? `automation:${d.id}:${envelope.occurrenceId}`,
+		);
 		if (item.kind === "session")
-			assert.deepEqual(item.payload, {
-				id: item.sessionId,
-				scopeRef: d.scopeRef,
-				role: d.role,
-			});
+			assert.deepEqual(
+				item.payload,
+				d.session ?? {
+					id: item.sessionId,
+					scopeRef: d.scopeRef,
+					role: d.role,
+				},
+			);
 		const key = `${item.sessionId}:${item.sequence}`,
 			hash = sessionDeliveryDigest(item);
 		const previous = activityReceipts.get(key);
@@ -290,7 +301,10 @@ export async function runAutomationDrive() {
 	});
 	app.post("/model", async (request) => {
 		counts.models++;
-		assert.equal(request.headers["x-api-key"], modelKey);
+		assert.equal(
+			codexImage ? request.headers.authorization : request.headers["x-api-key"],
+			codexImage ? `Bearer ${modelKey}` : modelKey,
+		);
 		const text = JSON.stringify(request.body);
 		if (holdEventModel && text.includes("event-live-slack")) {
 			eventModelStarted = true;
@@ -304,12 +318,60 @@ export async function runAutomationDrive() {
 		assert.ok(!text.includes(supervisorKey));
 		assert.ok(!text.includes('"token"'));
 		assert.ok(!text.includes('"grantId"'));
-		const replied = request.body.messages.some((m) => m.role === "assistant");
-		const name = request.body.system.includes(
-			'Available names: ["read_messages"]',
+		const replied = codexImage
+			? request.body.input.some((m) => m.type === "function_call_output")
+			: request.body.messages.some((m) => m.role === "assistant");
+		const name = (
+			codexImage
+				? request.body.tools.some((t) => t.name === "read_messages")
+				: request.body.system.includes('Available names: ["read_messages"]')
 		)
 			? "read_messages"
 			: "get_issue";
+		if (codexImage) {
+			const item = replied
+				? {
+						type: "message",
+						id: "msg_fixture",
+						role: "assistant",
+						content: [
+							{
+								type: "output_text",
+								text: "Verified assigned resource. No customer effect performed.",
+								annotations: [],
+							},
+						],
+						status: "completed",
+					}
+				: {
+						type: "function_call",
+						id: "fc_fixture",
+						call_id: "call_fixture",
+						name,
+						arguments: "{}",
+					};
+			const response = {
+				id: "resp_fixture",
+				object: "response",
+				status: "completed",
+				output: [item],
+				usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+			};
+			return [
+				[
+					"response.created",
+					{ response: { ...response, status: "in_progress", output: [] } },
+				],
+				["response.output_item.added", { output_index: 0, item }],
+				["response.output_item.done", { output_index: 0, item }],
+				["response.completed", { response }],
+			]
+				.map(
+					([type, data]) =>
+						`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`,
+				)
+				.join("");
+		}
 		return {
 			content: [
 				{
@@ -435,11 +497,53 @@ export async function runAutomationDrive() {
 				value.replace("https://automation.fixture", origin),
 				options,
 			);
-		if (value === "https://api.anthropic.com/v1/messages")
+		if (
+			value === "https://api.anthropic.com/v1/messages" ||
+			value === "https://chatgpt.com/backend-api/codex/responses"
+		)
 			return realFetch(`${origin}/model`, options);
 		if (value.startsWith(`${origin}/`)) return realFetch(url, options);
 		throw new Error("F1 external network denied");
 	};
+	let nativeModel;
+	if (codexImage) {
+		const { ContainedCodexAutomationModel } = await import(
+			"../../packages/edge-worker/dist/automations/ContainedCodexModel.js"
+		);
+		const { CodexLoginBroker } = await import(
+			"../../packages/codex-runner/dist/index.js"
+		);
+		const authHome = join(directory, "fixture-codex-login");
+		await mkdir(authHome, { mode: 0o700 });
+		await writeFile(
+			join(authHome, "auth.json"),
+			JSON.stringify({
+				auth_mode: "chatgpt",
+				tokens: { access_token: modelKey, account_id: "fixture-account" },
+			}),
+			{ mode: 0o600 },
+		);
+		const broker = new CodexLoginBroker(authHome);
+		nativeModel = new ContainedCodexAutomationModel(
+			{
+				image: codexImage,
+				dockerPath:
+					process.env.CYRUS_TEST_DOCKER_PATH || "/usr/local/bin/docker",
+				dockerHost: "unix:///var/run/docker.sock",
+			},
+			(request, context) =>
+				broker.respond(
+					request,
+					{
+						model: target.model,
+						scopeKey: context.state.scopeKey,
+						toolNames: permittedToolNames(context.authority()),
+						authorize: context.authorize,
+					},
+					context.signal,
+				),
+		);
+	}
 	let runtimeApp, runtime, runtimeOrigin;
 	let modelEnabled = true;
 	const ledger = new AutomationLedger(join(directory, "ledger"), "workspace-a");
@@ -463,14 +567,17 @@ export async function runAutomationDrive() {
 					() => ({ workspaceId: "workspace-a", apiKey: supervisorKey }),
 				),
 			},
-			model: new ConfiguredAutomationMessagesModel(() => ({
-				...target,
-				apiKey: modelKey,
-			})),
+			model:
+				nativeModel ||
+				new ConfiguredAutomationMessagesModel(() => ({
+					...target,
+					apiKey: modelKey,
+				})),
 			store: new AutomationCheckpointStore(checkpoints),
 			readiness: () => ({
 				...target,
 				reason: modelEnabled ? null : "Configured model unavailable",
+				...(codexImage && { adapter: "codex-app-server-contained-v1" }),
 			}),
 			pollMilliseconds: 50,
 			tools: (authority, credential, signal) =>
@@ -803,6 +910,51 @@ export async function runAutomationDrive() {
 			15000,
 		);
 		assert.equal(counts.resultCommits, eventBase + 3);
+		for (const ticket of [false, true]) {
+			const d = definition(
+				ticket ? "ticket-child" : "direct-child",
+				"customer-a",
+			);
+			d.role = "investigator";
+			d.session = {
+				id: `assignment:${randomUUID()}`,
+				parentSessionId: `automation:${manual.id}:${enqueued.json().occurrenceId}`,
+				scopeRef: d.scopeRef,
+				role: d.role,
+				...(ticket && {
+					issueContext: {
+						trackerId: "linear",
+						issueId: "fixture-assigned-issue",
+						issueIdentifier: "F1-1",
+					},
+				}),
+			};
+			assert.ok(
+				[...activityReceipts.values()].some(
+					(e) =>
+						e.item.sessionId === d.session.parentSessionId &&
+						e.item.kind === "session",
+				),
+			);
+			assert.equal(
+				(await call("definitions", { contractVersion: 1, definition: d }))
+					.statusCode,
+				200,
+			);
+			const count = counts.resultCommits;
+			await call("occurrences", {
+				...event,
+				automationId: d.id,
+				eventId: d.id,
+			});
+			await until(() => counts.resultCommits === count + 1);
+			const received = [...activityReceipts.values()].filter(
+				(e) => e.item.sessionId === d.session.id,
+			);
+			assert.deepEqual(received[0].item.payload, d.session);
+			assert.equal(received.at(-1).item.payload.status, "complete");
+			assert.equal(received[0].item.payload.externalSessionId, undefined);
+		}
 		await runtime.stop();
 		assert.equal(
 			(
@@ -831,7 +983,11 @@ export async function runAutomationDrive() {
 			409,
 		);
 		for (const filename of await readdir(checkpoints)) {
-			const saved = await readFile(join(checkpoints, filename), "utf8");
+			const raw = await readFile(join(checkpoints, filename), "utf8");
+			const native = JSON.parse(raw).native;
+			const saved =
+				raw +
+				(native ? Buffer.from(native.rollout, "base64").toString("utf8") : "");
 			assert.ok(!saved.includes(supervisorKey));
 			assert.ok(!saved.includes(modelKey));
 			assert.ok(!saved.includes('"token"'));
@@ -840,12 +996,15 @@ export async function runAutomationDrive() {
 		assert.equal(lostActivityAck, true);
 		assert.ok(activityReceipts.size >= 6);
 		const summary = {
+			target,
+			...(codexImage && { containedImage: codexImage }),
 			activityReceipts: activityReceipts.size,
 			passed: true,
 			directory,
 			counts,
 			assertions: [
 				"instruction through registered HTTP routes",
+				"direct and assigned-ticket child descriptors, parent linkage and separate durable activity journals",
 				"negotiated durable normalized session activities, lost activity ACK, terminal flush before result and receipt-only reconnect",
 				"admitted Slack/Linear event idle wake, active-turn queue, duplicate/out-of-order delivery and restart retention",
 				"event pause denial and cross-customer context separation",

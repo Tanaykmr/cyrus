@@ -406,3 +406,51 @@ describe("durable session sink (actual HTTP transport, controlled receiver)", ()
 		});
 	});
 });
+
+it.each([
+	false,
+	true,
+])("admits a child in a separate private journal only after current remote parent-link ACK: ticket=%s", async (ticket) => {
+	const f = await fixture();
+	const parentJournal = f.journal("workspace", "parent-scope");
+	await f.sink(parentJournal).createCyrusSession(parent);
+	const childJournal = f.journal("workspace", "child-scope");
+	const descriptor = {
+		...child,
+		...(ticket && {
+			issueContext: {
+				trackerId: "linear",
+				issueId: "issue-1",
+				issueIdentifier: "TEST-1",
+			},
+		}),
+	};
+	const sink = f.sink(childJournal);
+	f.state.loseAck = true;
+	await expect(sink.createCyrusSession(descriptor)).rejects.toThrow();
+	expect(childJournal.isCreated(child.id)).toBe(false);
+	expect(childJournal.peek()).toBeUndefined();
+	await sink.createCyrusSession(descriptor);
+	expect(childJournal.isCreated(child.id)).toBe(true);
+	expect(childJournal.isCreated(parent.id)).toBe(false);
+	expect(parentJournal.isCreated(child.id)).toBe(false);
+	await sink.postActivity(child.id, {
+		type: "response",
+		body: "Returned scoped findings",
+	});
+	expect(f.state.receipts.size).toBe(3);
+	const reopened = f.journal("workspace", "child-scope");
+	f.state.revoked = true;
+	await expect(
+		f.sink(reopened).createCyrusSession(descriptor),
+	).rejects.toThrow();
+	expect(reopened.isCreated(parent.id)).toBe(false);
+	f.state.revoked = false;
+	await f.sink(reopened).createCyrusSession(descriptor);
+	await expect(
+		f
+			.sink(reopened)
+			.createCyrusSession({ ...descriptor, parentSessionId: "foreign-parent" }),
+	).rejects.toThrow("identity cannot change");
+	expect(f.state.receipts.size).toBe(3);
+});
