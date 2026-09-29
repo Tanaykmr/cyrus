@@ -3,8 +3,11 @@
 This extends CYPACK-1546 / PR1507 and CYHOST-1321 / PR1102. It does not replace
 the [automation contract](runtime-automations-v1.md), its single SQLite scheduler,
 current-authority checks, contained MCP connections or terminal receipt recovery.
-The transport below is a proposal awaiting the hosted owner's acknowledgement;
-there is no enabled hosted activity transport in this runtime milestone.
+Hosted accepted the delivery path/envelope in coordination comment
+`d15d1384-5393-4440-ada6-2217d57c63c8`. Shared exported types and strict validators
+now live in `packages/edge-worker/src/sinks/session-delivery.ts`. There is no
+enabled hosted activity transport in this runtime milestone; the bounded signal
+metadata subset below still awaits explicit confirmation.
 
 ## Identity and delegation
 
@@ -55,7 +58,7 @@ also returns an empty result for unsuccessful activity creation. These are
 persistence gaps; do not mistake the presence of a normalizer for reliable
 delivery or treat a logged failure as an acknowledgement.
 
-## Proposed shared delivery contract and ownership
+## Shared delivery contract and ownership
 
 CYPACK owns normalized emission, a private scope-bound durable outbox, ordered
 replay, lifecycle emission and reconnect. CYHOST owns session/activity rows,
@@ -63,22 +66,35 @@ authorization, idempotent ingestion, retention/redaction policy and timeline UI.
 The existing linked issues are the shared dependency; no second customer-only
 transcript ontology or scheduling ledger is needed.
 
-Before wiring HTTP, agree an additive sink capability/version and exact path.
-Proposed supervisor transport is POST `/api/agent-sessions/v1/deliver` on the
+Accepted supervisor transport is POST `/api/agent-sessions/v1/deliver` on the
 existing registered connection. Supervisor credentials remain outside model,
 MCP context and checkpoints. Each request carries current attempt/fence authority
 plus a stable session-bound delivery item; refreshed attempt credentials must
-not change the item's identity or payload. This route is a proposal, not a claim
-that it exists or is authorized merely by runtime registration.
+not change the item's identity or payload. Agreement on this route does not mean it is already deployed or authorized
+merely by runtime registration.
 
-Proposed delivery item: `{sessionId, sequence, kind, payload}`; sequence starts at
+Delivery item: `{sessionId, sequence, kind, payload}`; sequence starts at
 1, is allocated durably by the runtime, and is immutable across retries. Kinds
 are session creation, activity (existing `AgentActivityContent` and
 `ActivityPostOptions`), and lifecycle update (existing `AgentSessionStatus`,
 optional harness/native identity). Parent creation precedes child creation.
 Hosted must reject a sequence gap and a reused sequence with changed payload;
 an exact duplicate returns the same durable acknowledgement. Runtime deletes
-pending items only after matching acknowledgement. This queue is transport
+pending items only after matching acknowledgement. The envelope is exactly
+`{contractVersion:1,instanceId,automationId,revision,occurrenceId,attemptId,fence,item}`.
+ACK is `{contractVersion:1,sessionId,sequence,digest}`; the digest is SHA256 of
+recursively key-sorted JSON of the item, preserving array order and rejecting
+undefined, nonfinite numbers and non-JSON values. Lifecycle payload is
+`{status:AgentSessionStatus,harness?:{type,sessionId}}`. Activity payload is
+`{content:AgentActivityContent,options?:ActivityPostOptions}`. No client-supplied
+digest substitutes for hosted computation. Items are bounded to128KiB and display
+text fields to32768 characters.
+
+The initial metadata subset proposed for confirmation accepts only
+`signal:"select",signalMetadata:{options:[{value:string}]}` (1–20 choices,
+maximum1000 characters each). auth/stop/continue carry no metadata; credential
+URLs and other arbitrary metadata are rejected. Existing legacy Linear sinks are
+unchanged. This queue is transport
 state, not an alternative work scheduler.
 
 Current authority is checked on every ingest/reconnect. A bounded, explicitly

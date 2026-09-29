@@ -72,6 +72,7 @@ export type {
 	SessionActivitySink,
 } from "./sinks/index.js";
 export { LinearActivitySink } from "./sinks/index.js";
+export * from "./sinks/session-delivery.js";
 export type { PromptType } from "./ToolPermissionResolver.js";
 export { ToolPermissionResolver } from "./ToolPermissionResolver.js";
 export type { EdgeWorkerEvents } from "./types.js";

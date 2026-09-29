@@ -6,6 +6,10 @@ reuse production registration, or create another workspace. Obtain the code from
 the existing onboarding at
 `https://cyrus-preview-cyhost-1321.vercel.app/settings/reauthenticate`.
 No code or credential belongs in comments, evidence or logs.
+Use only this alias for browser/OAuth/device pairing and QA. Verify its target
+deployment/head before every live test. Immutable deployment URLs are provenance
+only; do not use them as alternate authentication entrypoints or change callbacks
+to accommodate their redirects. Parent CYHOST-1304 remains closed.
 
 The exact immutable source, unpublished bundle path and SHA256 are supplied in
 the CYPACK-1546/CYHOST-1321 artifact comment. This is a test install, not an npm
