@@ -1,6 +1,7 @@
 # Customer runtime v1 (CYPACK-1546 / CYHOST-1321)
 
-Status: wire contract under coordination with CYHOST-1321. No published minimum
+Status: hosted owner is integrating the v1 wire contract; the renewal/result
+clarifications below are coordinated in CYHOST-1321. No published minimum
 `cyrus-ai` version exists yet. Do not infer support from the current package version.
 Hosted must require successful versioned capability discovery; a 404, old runtime,
 unknown version, or unavailable isolation backend must fail dispatch closed.
@@ -135,11 +136,65 @@ deduplicated/reconciled by hosted. A lost result acknowledgement resends the
 persisted result without another model turn.
 
 Revocation is checked before each model turn, tool and callback and polled every
-two seconds during work. The original lease/expiration also aborts locally. A
+two seconds during work. The current lease and original token expiration also abort locally. A
 gateway outage stops execution. Already-in-flight provider requests must be
 reconciled by hosted. Abrupt host termination can leave an offline container;
 operators must reap orphan `cyrus-scoped-*` containers before restarting the
 service. No container is reused by another run.
+
+### Owner fencing, renewable leases and terminal receipts
+
+Every launch/resume attempt creates a **new** `executionId`. This deliberately
+does not reuse the owner stored in a previous attempt. Hosted `/authorize` must
+perform atomic admission: a live different owner denies takeover; an expired
+owner or an explicitly interrupted owner permits it. Every tool/callback checks
+the current owner again. `phase: "interrupt"` is an authenticated control request,
+not a new execution owner; it fences the old owner and may return an already
+expired `leaseUntil`. Runtime still stops that local run and returns interrupted.
+Admission authenticates before local checkpoint lookup. If local admission then
+fails (for example, no checkpoint exists), hosted must explicitly interrupt that
+admission or wait for its lease to expire before attempting a new owner. A failed
+local request is not permission to bypass the gateway's current-owner fence.
+
+`phase: "operation"` revalidates and may renew the **same owner's** lease. Runtime
+serializes these checks and updates its local timer from the response. A reduced
+lease takes effect too. The local deadline is the earlier of the latest lease and
+the original token expiration (or any tighter expiration subsequently returned).
+Renewal cannot extend the bearer token lifetime. A late renewal after the previous
+deadline cannot resurrect an attempt. Revoked, stale, paused or mismatched scopes
+abort; they are not lease renewals. Hosted must not silently accept unknown phases.
+
+`phase: "result"` is an additional `/authorize` phase using the same v1 envelope.
+It authorizes delivery/reconciliation of the run's result. Hosted must allow a
+still-authenticated completed run to enter receipt-only recovery through
+`phase: "resume"` and `phase: "result"`, without reopening ordinary operations or
+progress updates. Scope, token expiration and the receipt-recovery owner/lease
+remain validated. If a result acknowledgement was lost, runtime sends the exact
+persisted result and key, with the new attempt ID. It does not invoke the model,
+create an engineering sandbox, or post progress, even if the sandbox backend is
+now unavailable. A locally acknowledged completed checkpoint returns completed
+without repeating any operation or result callback.
+
+For idempotency, namespace the receipt by authenticated scope and idempotency key,
+and bind the immutable operation parameters/files or result text. **Exclude
+`executionId` from the immutable payload digest**: it is validated separately as
+the current attempt, and changes on recovery. Changed immutable content under
+the same key must be rejected; uncertain external effects must be reconciled.
+Capability discovery now also advertises `leaseRenewal` and `resultReconciliation`.
+
+### Shared engineering sponsorship
+
+For `role: "engineering"`, `customerId` is immutable sponsoring provenance. The
+assignment is workspace-owned; top-level `generation` and `policyRevision` bind
+the **assignment's** fence/revision, independently of the sponsoring coordinator.
+This uses the existing strict v1 schema, without optional unrecognized fields.
+The gateway must not apply customer-coordinator pause/revocation to the shared
+assignment merely because that customer withdraws while other customers still
+require it. Keep the run's sponsoring identity stable; changing it creates a new
+scope and cannot attach to the old checkpoint. Assignment revocation or revision
+changes must still deny the old engineering run. Engineering scope always has
+zero customer reads, no customer action authority and only the reviewed technical
+input. Customer-specific results/decisions remain each coordinator's responsibility.
 
 ## Validation boundaries
 

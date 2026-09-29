@@ -94,7 +94,7 @@ export async function authenticate(
 	gateway: ScopedGateway,
 	token: string,
 	executionId: string,
-	phase: "launch" | "resume" | "operation" | "interrupt",
+	phase: "launch" | "resume" | "operation" | "interrupt" | "result",
 	signal: AbortSignal,
 ): Promise<Authorization> {
 	return authorizationSchema.parse(

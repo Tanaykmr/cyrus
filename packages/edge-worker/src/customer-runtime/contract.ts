@@ -38,9 +38,11 @@ export const engineeringSchema = z
 export const scopeSchema = z
 	.object({
 		workspaceId: id,
+		// For engineering this is stable sponsoring provenance, not customer authority.
 		customerId: id,
 		runId: id,
 		role: z.enum(["coordinator", "worker", "engineering"]),
+		// Engineering uses the workspace assignment's independent fence/revision.
 		generation: z.number().int().nonnegative(),
 		policyRevision: z.number().int().nonnegative(),
 		expiresAt: z.string().datetime(),

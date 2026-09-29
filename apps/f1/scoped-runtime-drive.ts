@@ -40,6 +40,8 @@ const tokens = Object.fromEntries(
 		"other-workspace",
 		"interrupt",
 		"revoke",
+		"renew",
+		"result-retry",
 	].map((name) => [name, `fixture-${name.padEnd(40, "-")}`]),
 );
 const receipts: Array<{
@@ -50,6 +52,9 @@ const receipts: Array<{
 let revoked = false;
 let interruptStarted: (() => void) | undefined;
 let baseUrl = "";
+let terminalResult: Record<string, unknown> | undefined;
+let terminalModelCalls = 0;
+const owners = new Map<string, { executionId: unknown; leaseUntil: number }>();
 
 function authorization(name: string): Authorization {
 	const scope: Authorization["scope"] = {
@@ -63,6 +68,8 @@ function authorization(name: string): Authorization {
 		leaseUntil: new Date(Date.now() + 120_000).toISOString(),
 		reads: [],
 	};
+	if (name === "renew")
+		scope.leaseUntil = new Date(Date.now() + 150).toISOString();
 	if (name === "engineering") {
 		scope.role = "engineering";
 		scope.engineering = {
@@ -102,8 +109,54 @@ const gateway: ScopedGateway = {
 		const name = Object.keys(tokens).find((key) => tokens[key] === bearer);
 		assert(name, "invalid fixture capability");
 		if (name === "revoke" && revoked) throw new Error("revoked");
-		if (endpoint === "authorize") return authorization(name);
+		if (endpoint === "authorize") {
+			const auth = authorization(name);
+			const owner = owners.get(name);
+			if (body.phase === "launch" || body.phase === "resume") {
+				if (owner && owner.leaseUntil > Date.now())
+					throw new Error("active owner");
+				owners.set(name, {
+					executionId: body.executionId,
+					leaseUntil: Date.parse(auth.scope.leaseUntil),
+				});
+			} else if (body.phase === "interrupt") {
+				owners.delete(name);
+				auth.scope.leaseUntil = new Date(0).toISOString();
+			} else {
+				assert(
+					owner &&
+						owner.executionId === body.executionId &&
+						owner.leaseUntil > Date.now(),
+					"stale execution",
+				);
+				if (name === "result-retry" && terminalResult)
+					assert.equal(
+						body.phase,
+						"result",
+						"terminal runs reject normal authorization",
+					);
+				owner.leaseUntil = Date.parse(auth.scope.leaseUntil);
+			}
+			return auth;
+		}
+		assert.equal(
+			owners.get(name)?.executionId,
+			body.executionId,
+			"callback owner",
+		);
+		if (name === "result-retry" && terminalResult)
+			assert.equal(endpoint, "result", "terminal runs reject progress/tools");
 		receipts.push({ endpoint, name, body });
+		if (endpoint === "result" && name === "result-retry") {
+			const { executionId: _attempt, ...immutable } = body;
+			if (!terminalResult) {
+				terminalResult = immutable;
+				owners.delete(name); // Terminal receipt recovery can admit a fresh attempt.
+				throw new Error("simulated lost result acknowledgement");
+			}
+			assert.deepEqual(immutable, terminalResult);
+			owners.delete(name);
+		}
 		if (endpoint === "delegate") {
 			assert.equal(name, "coordinator");
 			const response = await post("runs", "engineering");
@@ -127,6 +180,20 @@ const gateway: ScopedGateway = {
 let interruptionCount = 0;
 const model: ScopedModel = {
 	async next(messages, scope, signal) {
+		if (scope.runId === "result-retry") terminalModelCalls++;
+		if (scope.runId === "renew") {
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(resolve, 400);
+				signal.addEventListener(
+					"abort",
+					() => {
+						clearTimeout(timer);
+						reject(new Error("premature lease expiry"));
+					},
+					{ once: true },
+				);
+			});
+		}
 		const turns = messages.filter(
 			(message) => message.role === "assistant",
 		).length;
@@ -216,6 +283,9 @@ try {
 		403,
 	);
 	assert.equal((await post("resume", "other-customer")).status, 403);
+	// Admission authenticates before local checkpoint lookup. Release that
+	// unsuccessful admission explicitly before starting a fresh run.
+	assert.equal((await post("interrupt", "other-customer")).status, 202);
 	assert.equal((await post("runs", "coordinator")).status, 202);
 	await runtime.drain();
 	await runtime.drain(); // Delegation admitted while coordinator was running.
@@ -249,6 +319,11 @@ try {
 	});
 	assert.equal((await post("runs", "interrupt")).status, 202);
 	await started;
+	assert.equal(
+		(await post("resume", "interrupt")).status,
+		403,
+		"live lease rejects takeover",
+	);
 	assert.equal((await post("interrupt", "interrupt")).status, 202);
 	assert.equal((await post("resume", "interrupt")).status, 202);
 	await runtime.drain();
@@ -263,6 +338,50 @@ try {
 	assert(!receipts.some((r) => r.endpoint === "result" && r.name === "revoke"));
 	console.log(
 		"PASS interruption/resume and live revocation denying resume/result",
+	);
+	assert.equal((await post("runs", "renew")).status, 202);
+	await runtime.drain();
+	assert(
+		receipts.some(
+			(entry) => entry.name === "renew" && entry.endpoint === "result",
+		),
+		"renewed work survives original 150ms lease",
+	);
+	assert.equal((await post("runs", "result-retry")).status, 202);
+	await runtime.drain();
+	assert.equal((await post("resume", "result-retry")).status, 202);
+	await runtime.drain();
+	const terminalCallbacks = receipts.filter(
+		(entry) => entry.name === "result-retry" && entry.endpoint === "result",
+	);
+	assert.equal(terminalCallbacks.length, 2);
+	assert.notEqual(
+		terminalCallbacks[0]!.body.executionId,
+		terminalCallbacks[1]!.body.executionId,
+	);
+	assert.equal(terminalModelCalls, 1);
+	assert.equal(
+		receipts.filter(
+			(entry) => entry.name === "result-retry" && entry.endpoint === "progress",
+		).length,
+		1,
+	);
+	assert.equal(
+		(
+			(await (await post("resume", "result-retry")).json()) as {
+				status: string;
+			}
+		).status,
+		"completed",
+	);
+	assert.equal(
+		receipts.filter(
+			(entry) => entry.name === "result-retry" && entry.endpoint === "result",
+		).length,
+		2,
+	);
+	console.log(
+		"PASS renewable lease, fenced resume takeover, terminal receipt reconciliation and completed local resume",
 	);
 	console.log(
 		JSON.stringify({

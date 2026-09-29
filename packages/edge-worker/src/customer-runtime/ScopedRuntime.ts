@@ -46,6 +46,8 @@ export class ScopedRuntime {
 			nativeTools: false,
 			customerReads: true,
 			coordinatorActions: true,
+			leaseRenewal: true,
+			resultReconciliation: true,
 			engineering: Boolean(this.options.sandbox),
 			sharedMemory: false,
 			scopedResume: true,
@@ -72,8 +74,6 @@ export class ScopedRuntime {
 		assertLive(authorization.scope);
 		if (this.active.size + this.admitting.size >= 8)
 			throw new Error("Scoped runtime at capacity");
-		if (authorization.scope.engineering && !this.options.sandbox)
-			throw new Error("Engineering isolation unavailable");
 		const key = scopeKey(authorization.scope);
 		if (this.active.has(key) || this.admitting.has(key))
 			throw new Error("Run already active");
@@ -86,6 +86,12 @@ export class ScopedRuntime {
 				throw new Error("Existing run requires authenticated resume");
 			if (previous?.status === "completed")
 				return { runId: authorization.scope.runId, status: "completed" };
+			if (
+				authorization.scope.engineering &&
+				!this.options.sandbox &&
+				previous?.result === undefined
+			)
+				throw new Error("Engineering isolation unavailable");
 			const state: Checkpoint = previous ?? {
 				version: 1,
 				scopeKey: key,
@@ -142,7 +148,10 @@ export class ScopedRuntime {
 			"interrupt",
 			new AbortController().signal,
 		);
-		assertLive(auth.scope);
+		// Hosted may already have expired the execution lease as part of this
+		// authenticated control operation. It is not a new execution admission.
+		if (Date.parse(auth.scope.expiresAt) <= Date.now())
+			throw new Error("Execution capability expired");
 		const run = this.active.get(scopeKey(auth.scope));
 		if (run) {
 			run.controller.abort();
@@ -171,25 +180,67 @@ export class ScopedRuntime {
 		const signal = controller.signal;
 		let sandbox: EngineeringSandbox | undefined;
 		let checking = false;
-		const fresh = async () => {
-			signal.throwIfAborted();
-			const current = await authenticate(
-				this.options.gateway,
-				token,
-				executionId,
-				"operation",
-				signal,
+		let finished = false;
+		let capabilityExpiry = Date.parse(auth.scope.expiresAt);
+		let deadline = Math.min(
+			capabilityExpiry,
+			Date.parse(auth.scope.leaseUntil),
+		);
+		let expiry: ReturnType<typeof setTimeout> | undefined;
+		const armDeadline = () => {
+			clearTimeout(expiry);
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) controller.abort();
+			else expiry = setTimeout(armDeadline, Math.min(remaining, 2_147_483_647));
+		};
+		// Foreground preflights and background renewals must not race: an older
+		// authorization response must never overwrite a newer lease decision.
+		let refreshQueue = Promise.resolve();
+		const fresh = (
+			phase: "operation" | "result" = "operation",
+		): Promise<ExecutionScope> => {
+			const attempt = refreshQueue.then(async () => {
+				if (Date.now() >= deadline) controller.abort();
+				signal.throwIfAborted();
+				if (finished) throw new Error("Execution has ended");
+				const current = await authenticate(
+					this.options.gateway,
+					token,
+					executionId,
+					phase,
+					signal,
+				);
+				// A response arriving after expiration cannot resurrect this attempt.
+				if (Date.now() >= deadline) controller.abort();
+				signal.throwIfAborted();
+				if (finished) throw new Error("Execution has ended");
+				assertLive(current.scope);
+				if (scopeKey(current.scope) !== state.scopeKey)
+					throw new Error("Execution scope changed");
+				capabilityExpiry = Math.min(
+					capabilityExpiry,
+					Date.parse(current.scope.expiresAt),
+				);
+				deadline = Math.min(
+					capabilityExpiry,
+					Date.parse(current.scope.leaseUntil),
+				);
+				armDeadline();
+				return current.scope;
+			});
+			refreshQueue = attempt.then(
+				() => {},
+				() => {
+					controller.abort();
+				},
 			);
-			assertLive(current.scope);
-			if (scopeKey(current.scope) !== state.scopeKey)
-				throw new Error("Execution scope changed");
-			return current.scope;
+			return attempt;
 		};
 		const callback = async (
 			endpoint: GatewayEndpoint,
 			body: Record<string, unknown>,
 		) => {
-			await fresh();
+			await fresh(endpoint === "result" ? "result" : "operation");
 			return this.options.gateway.call(
 				endpoint,
 				token,
@@ -202,7 +253,7 @@ export class ScopedRuntime {
 				if (checking) return;
 				checking = true;
 				try {
-					await fresh();
+					await fresh(state.result !== undefined ? "result" : "operation");
 				} catch {
 					controller.abort();
 				} finally {
@@ -211,17 +262,19 @@ export class ScopedRuntime {
 			},
 			Math.min(this.options.revalidateMs ?? 2000, 2000),
 		);
-		const expiry = setTimeout(
-			() => controller.abort(),
-			Math.max(
-				0,
-				Math.min(
-					Date.parse(auth.scope.expiresAt),
-					Date.parse(auth.scope.leaseUntil),
-				) - Date.now(),
-			),
-		);
+		armDeadline();
 		try {
+			// Terminal receipt reconciliation must not reopen a sandbox, call the
+			// model, or post progress on a run hosted has already completed.
+			if (state.result !== undefined) {
+				await callback("result", {
+					text: state.result,
+					idempotencyKey: `${state.scopeKey}:result`,
+				});
+				state.status = "completed";
+				await this.options.store.save(state);
+				return;
+			}
 			if (auth.scope.engineering) {
 				sandbox = this.options.sandbox!();
 				await fresh();
@@ -232,15 +285,6 @@ export class ScopedRuntime {
 				status: "running",
 				idempotencyKey: `${state.scopeKey}:${state.sequence}:running`,
 			});
-			if (state.result !== undefined) {
-				await callback("result", {
-					text: state.result,
-					idempotencyKey: `${state.scopeKey}:result`,
-				});
-				state.status = "completed";
-				await this.options.store.save(state);
-				return;
-			}
 			for (let turn = 0; turn < (this.options.maxTurns ?? 40); turn++) {
 				const scope = await fresh();
 				if (!state.pending) {
@@ -307,8 +351,10 @@ export class ScopedRuntime {
 			// Revoked tokens cannot post new callbacks. Hosted observes lease expiry and
 			// owns recovery; never downgrade or retry through an unscoped runner.
 		} finally {
+			finished = true;
 			clearInterval(poll);
 			clearTimeout(expiry);
+			controller.abort();
 			await sandbox?.stop();
 		}
 	}
