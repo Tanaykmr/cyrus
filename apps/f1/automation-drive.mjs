@@ -20,6 +20,12 @@ import { ConfiguredAutomationMessagesModel } from "../../packages/edge-worker/di
 import { registerAutomationRoutes } from "../../packages/edge-worker/dist/automations/register.js";
 import { ScopedAutomationMcpClient } from "../../packages/edge-worker/dist/automations/ScopedMcpClient.js";
 
+import { HttpSessionDeliveryTransport } from "../../packages/edge-worker/dist/sinks/SessionDeliveryTransport.js";
+import {
+	parseSessionDeliveryEnvelope,
+	sessionDeliveryDigest,
+} from "../../packages/edge-worker/dist/sinks/session-delivery.js";
+
 const require = createRequire(
 	new URL("../../packages/edge-worker/package.json", import.meta.url),
 );
@@ -48,7 +54,10 @@ export async function runAutomationDrive() {
 		sessions = new Map(),
 		results = new Map(),
 		operationReceipts = new Map();
+	const activityReceipts = new Map();
+	let lostActivityAck = false;
 	const counts = {
+		sessionDeliveries: 0,
 		initialize: 0,
 		list: 0,
 		tools: 0,
@@ -164,6 +173,17 @@ export async function runAutomationDrive() {
 			});
 			return {
 				authority,
+				...(request.headers["x-cyrus-session-delivery"] === "1" && {
+					sessionDelivery: {
+						contractVersion: 1,
+						path: "/api/agent-sessions/v1/deliver",
+						session: {
+							id: `automation:${d.id}:${b.occurrenceId}`,
+							scopeRef: d.scopeRef,
+							role: d.role,
+						},
+					},
+				}),
 				mcp: {
 					token,
 					audience: "/mcp",
@@ -178,6 +198,12 @@ export async function runAutomationDrive() {
 		}
 		if (request.params.operation === "result") {
 			counts.resultTransmissions++;
+			const sessionItems = [...activityReceipts.values()].filter(
+				(entry) =>
+					entry.item.sessionId === `automation:${d.id}:${b.occurrenceId}`,
+			);
+			assert.equal(sessionItems.length, 6);
+			assert.equal(sessionItems.at(-1).item.payload.status, "complete");
 			const previous = results.get(b.occurrenceId);
 			if (previous) assert.equal(previous.key, b.idempotencyKey);
 			else {
@@ -205,6 +231,62 @@ export async function runAutomationDrive() {
 			};
 		}
 		return denied(reply);
+	});
+	app.post("/api/agent-sessions/v1/deliver", async (request, reply) => {
+		if (
+			request.headers.authorization !== `Bearer ${supervisorKey}` ||
+			request.headers["x-cyrus-team-id"] !== "workspace-a"
+		)
+			return denied(reply, 401);
+		const envelope = parseSessionDeliveryEnvelope(request.body);
+		const current = [...grants.values()].find(
+			(g) =>
+				!g.revoked &&
+				g.until > Date.now() &&
+				g.instanceId === envelope.instanceId &&
+				g.authority.occurrenceId === envelope.occurrenceId &&
+				g.authority.attemptId === envelope.attemptId &&
+				g.authority.fence === envelope.fence,
+		);
+		if (!current) return denied(reply);
+		const d = current.authority.definition;
+		const item = envelope.item;
+		assert.equal(item.sessionId, `automation:${d.id}:${envelope.occurrenceId}`);
+		if (item.kind === "session")
+			assert.deepEqual(item.payload, {
+				id: item.sessionId,
+				scopeRef: d.scopeRef,
+				role: d.role,
+			});
+		const key = `${item.sessionId}:${item.sequence}`,
+			hash = sessionDeliveryDigest(item);
+		const previous = activityReceipts.get(key);
+		if (previous) assert.equal(previous.digest, hash);
+		else {
+			assert.equal(results.has(envelope.occurrenceId), false);
+			assert.equal(
+				item.sequence,
+				[...activityReceipts.values()].filter(
+					(e) => e.item.sessionId === item.sessionId,
+				).length + 1,
+			);
+			activityReceipts.set(key, { item, digest: hash });
+		}
+		counts.sessionDeliveries++;
+		if (
+			!lostActivityAck &&
+			item.kind === "activity" &&
+			item.payload.content.type === "response"
+		) {
+			lostActivityAck = true;
+			return reply.code(503).send({ error: "Controlled lost activity ACK" });
+		}
+		return {
+			contractVersion: 1,
+			sessionId: item.sessionId,
+			sequence: item.sequence,
+			digest: hash,
+		};
 	});
 	app.post("/model", async (request) => {
 		counts.models++;
@@ -365,10 +447,22 @@ export async function runAutomationDrive() {
 		runtime = new AutomationRuntime({
 			workspaceId: () => "workspace-a",
 			ledger,
-			gateway: new AutomationHttpGateway("https://automation.fixture", () => ({
-				apiKey: supervisorKey,
-				workspaceId: "workspace-a",
-			})),
+			gateway: new AutomationHttpGateway(
+				"https://automation.fixture",
+				() => ({
+					apiKey: supervisorKey,
+					workspaceId: "workspace-a",
+				}),
+				true,
+			),
+			sessions: {
+				directory: join(directory, "session-journal"),
+				secrets: () => [supervisorKey, modelKey],
+				transport: new HttpSessionDeliveryTransport(
+					"https://automation.fixture",
+					() => ({ workspaceId: "workspace-a", apiKey: supervisorKey }),
+				),
+			},
 			model: new ConfiguredAutomationMessagesModel(() => ({
 				...target,
 				apiKey: modelKey,
@@ -743,12 +837,16 @@ export async function runAutomationDrive() {
 			assert.ok(!saved.includes('"token"'));
 			assert.ok(!saved.includes('"grantId"'));
 		}
+		assert.equal(lostActivityAck, true);
+		assert.ok(activityReceipts.size >= 6);
 		const summary = {
+			activityReceipts: activityReceipts.size,
 			passed: true,
 			directory,
 			counts,
 			assertions: [
 				"instruction through registered HTTP routes",
+				"negotiated durable normalized session activities, lost activity ACK, terminal flush before result and receipt-only reconnect",
 				"admitted Slack/Linear event idle wake, active-turn queue, duplicate/out-of-order delivery and restart retention",
 				"event pause denial and cross-customer context separation",
 				"actual scheduled tick",

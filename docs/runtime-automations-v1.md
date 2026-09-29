@@ -243,3 +243,33 @@ absent from checkpoints. This is not the joint Hosted implementation acceptance.
 Independent actual Hosted admission/SQL/MCP, connected-account denial, visible customer
 result and current-head UI verification remain required. No production enablement,
 live provider/model effects, publication or merge are authorized by these tests.
+
+
+## Negotiated session delivery and paired bootstrap
+
+The registered runtime advertises `sessionActivities` only when its private journal
+and fixed-origin transport are configured. Its authorize/renew requests negotiate
+`X-Cyrus-Session-Delivery: 1`; older authorities may omit `sessionDelivery`. When
+present, v1 uses `/api/agent-sessions/v1/deliver` and the shared Cyrus session/activity
+ontology. The admitted descriptor is bound to scope/role and persisted in the private
+checkpoint; renewal or recovery cannot change it or silently remove delivery.
+
+Root creation is acknowledged before model execution. Tool start/result and final
+response/lifecycle use immutable source-event keys in the receipt journal. Tool
+output is checkpointed before activity emission. Replay retains sequence, content
+and digest across attempts. All final items must receive exact ACKs before the
+runtime transmits `/result`; lost result ACK recovery replays only identical receipts
+and the immutable result, never the model, tools or progress. Display fields use the
+shared 32,768-character bound; credentials are redacted before journal persistence.
+The bounded journal fails closed when full. It is transport storage, not a scheduler.
+Child descriptors remain unavailable until separate server-admitted child binding
+support is integrated; neither a parent ID nor role in model text grants execution.
+
+New paired auth responses may include authenticated `config.teamId`. Pending launch
+then GETs `/api/config/runtime` with the existing paired API key/team header before
+starting workers. It accepts only v1 strict config and allowlisted environment keys,
+keeps the selected HTTPS origin and local port/path configuration, and writes private
+files with a recovery marker. No scope, tunnel token, API key or origin may be
+replaced by bootstrap. Existing configured/unpaired workflows retain their behavior;
+old paired installs lacking team ID still need the existing authenticated config
+push once. Bootstrap configuration is not proof of contained harness readiness.

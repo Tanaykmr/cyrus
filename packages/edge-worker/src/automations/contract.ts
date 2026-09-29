@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import {
+	cyrusSessionDescriptorSchema,
+	SESSION_DELIVERY_PATH,
+} from "../sinks/session-delivery.js";
 
 export const AUTOMATION_VERSION = 1 as const;
 const id = z
@@ -91,7 +95,18 @@ export const mcpCredentialSchema = z
 	})
 	.strict();
 export const admissionSchema = z
-	.object({ authority: authoritySchema, mcp: mcpCredentialSchema })
+	.object({
+		authority: authoritySchema,
+		mcp: mcpCredentialSchema,
+		sessionDelivery: z
+			.object({
+				contractVersion: z.literal(1),
+				path: z.literal(SESSION_DELIVERY_PATH),
+				session: cyrusSessionDescriptorSchema,
+			})
+			.strict()
+			.optional(),
+	})
 	.strict();
 export type AutomationAdmission = z.infer<typeof admissionSchema>;
 export type McpCredential = z.infer<typeof mcpCredentialSchema>;

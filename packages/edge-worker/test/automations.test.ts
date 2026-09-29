@@ -434,6 +434,35 @@ describe("resource-bound tools and private resume", () => {
 	});
 });
 
+it("reports the selected Codex model without borrowing Claude aliases or claiming its adapter", async () => {
+	vi.stubEnv("CYRUS_TEAM_ID", "workspace-a");
+	vi.stubEnv("CYRUS_API_KEY", "fixture");
+	vi.stubEnv("CYRUS_APP_URL", "https://hosted.fixture");
+	vi.stubEnv("CYRUS_DEFAULT_RUNNER", "codex");
+	vi.stubEnv("CYRUS_CODEX_DEFAULT_MODEL", undefined);
+	vi.stubEnv("CYRUS_CLAUDE_DEFAULT_MODEL", "opus");
+	const app = Fastify();
+	const runtime = registerConfiguredAutomations(app, await directory(), () => ({
+		defaultRunner: "codex",
+		codexDefaultModel: "gpt-5.5",
+		claudeDefaultModel: "opus",
+	}));
+	try {
+		const capabilities = runtime.capabilities();
+		expect(capabilities.target).toEqual({
+			harness: "codex",
+			model: "gpt-5.5",
+			adapter: null,
+		});
+		expect(capabilities.available).toBe(false);
+		expect(capabilities.reason).toBe(
+			"Configured harness has no contained automation adapter",
+		);
+	} finally {
+		await app.close();
+	}
+});
+
 describe("terminal receipts survive definition and model changes", () => {
 	it.each([
 		"paused",
@@ -625,4 +654,157 @@ it("bounds receipt retries independently and does not resurrect them on definiti
 	db.upsert({ ...d, revision: 3 });
 	now += 100000;
 	expect(db.claim(2, false)).toEqual([]);
+});
+
+it("flushes immutable session receipts before completion and replays a lost result ACK without reopening tools/model", async () => {
+	let now = Date.now();
+	const db = await ledger(() => now);
+	const d = definition();
+	db.upsert(d);
+	const occurrence = db.enqueue(d.id, 1, "session-event", "Review");
+	const { sessionDeliveryDigest } = await import(
+		"../src/sinks/session-delivery.js"
+	);
+	const receipts = new Map<number, string>();
+	const deliveries: Array<{ sequence: number; attempt: string; kind: string }> =
+		[];
+	let blocked = true,
+		committed = false,
+		modelCalls = 0,
+		toolCalls = 0,
+		results = 0;
+	const options = {
+		workspaceId: () => d.workspaceId,
+		ledger: db,
+		store: new AutomationCheckpointStore(await directory()),
+		readiness: () => ({ ...d.target, reason: null }),
+		sessions: {
+			directory: await directory(),
+			secrets: () => ["supervisor-secret"],
+			transport: {
+				async deliver(
+					envelope: import("../src/sinks/session-delivery.js").SessionDeliveryEnvelope,
+				) {
+					const { item } = envelope;
+					deliveries.push({
+						sequence: item.sequence,
+						attempt: envelope.attemptId,
+						kind: item.kind,
+					});
+					const hash = sessionDeliveryDigest(item);
+					if (receipts.has(item.sequence))
+						expect(receipts.get(item.sequence)).toBe(hash);
+					else {
+						expect(committed).toBe(false);
+						expect(item.sequence).toBe(receipts.size + 1);
+						receipts.set(item.sequence, hash);
+					}
+					if (
+						item.kind === "activity" &&
+						item.payload.content.type === "response" &&
+						blocked
+					)
+						throw new Error("Lost response ACK");
+					return {
+						contractVersion: 1 as const,
+						sessionId: item.sessionId,
+						sequence: item.sequence,
+						digest: hash,
+					};
+				},
+			},
+		},
+		tools: () => ({
+			async call() {
+				toolCalls++;
+				return { items: [{ text: "Scoped issue" }], nextCursor: null };
+			},
+			async close() {},
+			async renew(fn: () => Promise<void>) {
+				await fn();
+			},
+		}),
+		model: {
+			async next() {
+				modelCalls++;
+				return modelCalls === 1
+					? {
+							type: "tool" as const,
+							call: { name: "get_issue" as const, arguments: {} },
+						}
+					: { type: "result" as const, text: "Completed review" };
+			},
+		},
+		gateway: {
+			async call(endpoint: string, body: Record<string, unknown>) {
+				if (endpoint === "authorize")
+					return {
+						authority: authority({
+							definition: { ...d, grants: authority().definition.grants },
+							occurrenceId: occurrence.id,
+							attemptId: String(body.attemptId),
+							fence: Number(body.fence),
+							input: occurrence.input,
+							phase: committed ? "reconcile" : "execute",
+						}),
+						mcp: {
+							token: "fixture-credential-not-a-live-secret",
+							audience: "/mcp",
+							expiresAt: new Date(Date.now() + 60000).toISOString(),
+							grantId: "bound-grant",
+						},
+						sessionDelivery: {
+							contractVersion: 1,
+							path: "/api/agent-sessions/v1/deliver",
+							session: {
+								id: "session-root",
+								scopeRef: d.scopeRef,
+								role: d.role,
+							},
+						},
+					};
+				if (endpoint === "progress") return {};
+				results++;
+				expect(receipts.size).toBe(6);
+				expect(blocked).toBe(false);
+				if (!committed) {
+					committed = true;
+					throw new Error("Lost result ACK");
+				}
+				return {
+					contractVersion: 1,
+					acknowledged: true,
+					occurrenceId: body.occurrenceId,
+					idempotencyKey: body.idempotencyKey,
+				};
+			},
+		},
+	};
+	let runtime = new AutomationRuntime(options);
+	await runtime.wake();
+	await runtime.stop();
+	expect(results).toBe(0);
+	expect(modelCalls).toBe(2);
+	expect(toolCalls).toBe(1);
+	blocked = false;
+	now += 6000;
+	runtime = new AutomationRuntime(options);
+	await runtime.wake();
+	await runtime.stop();
+	expect(results).toBe(1);
+	now += 11000;
+	runtime = new AutomationRuntime(options);
+	await runtime.wake();
+	await runtime.stop();
+	expect(db.status(d.id).occurrences[0]?.status).toBe("completed");
+	expect({ results, modelCalls, toolCalls }).toEqual({
+		results: 2,
+		modelCalls: 2,
+		toolCalls: 1,
+	});
+	expect(receipts.size).toBe(6);
+	expect(
+		new Set(deliveries.filter((d) => d.sequence === 1).map((d) => d.attempt))
+			.size,
+	).toBe(3);
 });

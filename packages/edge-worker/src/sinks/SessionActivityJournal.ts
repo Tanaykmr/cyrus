@@ -29,6 +29,18 @@ const stateSchema = z
 				z
 					.object({
 						descriptor: cyrusSessionDescriptorSchema,
+						sources: z
+							.array(
+								z
+									.object({
+										key: z.string().min(1).max(300),
+										sequence: z.number().int().positive(),
+										digest: z.string().regex(/^[a-f0-9]{64}$/),
+									})
+									.strict(),
+							)
+							.max(4096)
+							.default([]),
 						nextSequence: z.number().int().positive().safe(),
 						ackSequence: z.number().int().nonnegative().safe(),
 						ackDigest: z
@@ -159,6 +171,7 @@ export class SessionActivityJournal {
 				throw new Error("Parent creation must be acknowledged first");
 			state.sessions.push({
 				descriptor: cyrusSessionDescriptorSchema.parse(descriptor),
+				sources: [],
 				nextSequence: 2,
 				ackSequence: 0,
 				ackDigest: null,
@@ -184,16 +197,31 @@ export class SessionActivityJournal {
 						{ kind: "lifecycle" }
 					>["payload"];
 			  },
+		sourceKey?: string,
 	): SessionDeliveryItem {
 		return this.transact((state) => {
 			const session = state.sessions.find((s) => s.descriptor.id === sessionId);
 			if (!session || session.ackSequence < 1)
 				throw new Error("Session has no admitted creation receipt");
+			const previous = sourceKey
+				? session.sources.find((source) => source.key === sourceKey)
+				: undefined;
 			const item = parseSessionDeliveryItem({
 				sessionId,
-				sequence: session.nextSequence,
+				sequence: previous?.sequence ?? session.nextSequence,
 				...event,
 			});
+			if (previous) {
+				if (previous.digest !== sessionDeliveryDigest(item))
+					throw new Error("Source event changed on replay");
+				return item;
+			}
+			if (sourceKey)
+				session.sources.push({
+					key: sourceKey,
+					sequence: item.sequence,
+					digest: sessionDeliveryDigest(item),
+				});
 			session.nextSequence++;
 			state.pending.push(item);
 			return item;

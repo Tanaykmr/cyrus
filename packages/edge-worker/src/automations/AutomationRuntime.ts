@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { AgentActivityType } from "@linear/sdk";
+import { AgentSessionStatus } from "cyrus-core";
 import { z } from "zod";
-import type {
-	AutomationCheckpoint,
-	AutomationCheckpointStore,
+import { DurableCyrusSessionSink } from "../sinks/DurableCyrusSessionSink.js";
+import { SessionActivityJournal } from "../sinks/SessionActivityJournal.js";
+import type { SessionDeliveryTransport } from "../sinks/SessionDeliveryTransport.js";
+import {
+	type AutomationCheckpoint,
+	type AutomationCheckpointStore,
+	automationToolOutputSchema,
 } from "./CheckpointStore.js";
 import {
 	type AutomationAdmission,
@@ -40,6 +46,11 @@ export interface AutomationRuntimeOptions {
 		harness: string;
 		model: string;
 	};
+	sessions?: {
+		directory: string;
+		transport: SessionDeliveryTransport;
+		secrets: () => readonly string[];
+	};
 	pollMilliseconds?: number;
 	renewMilliseconds?: number;
 }
@@ -70,10 +81,14 @@ export class AutomationRuntime {
 			target: {
 				harness: configured.harness,
 				model: configured.model,
-				adapter: "anthropic-messages-contained-v1",
+				adapter:
+					configured.harness === "claude"
+						? "anthropic-messages-contained-v1"
+						: null,
 			},
 			capabilities: {
 				automations: true,
+				sessionActivities: !!this.options.sessions,
 				scheduledTicks: true,
 				eventInputs: true,
 				harnessStreaming: false,
@@ -190,6 +205,18 @@ export class AutomationRuntime {
 			),
 		);
 		const next = admission.authority;
+		if (admission.sessionDelivery) {
+			const session = admission.sessionDelivery.session;
+			if (
+				!this.options.sessions ||
+				session.scopeRef !== next.definition.scopeRef ||
+				session.role !== next.definition.role ||
+				session.parentSessionId ||
+				session.issueContext ||
+				session.externalSessionId
+			)
+				throw new Error("Session delivery admission mismatch");
+		}
 		this.check(next, !!occurrence.receipt);
 		if (
 			(next.definition.grants.length > 0 &&
@@ -241,6 +268,9 @@ export class AutomationRuntime {
 		let authority = initial;
 		let credential = admission.mcp;
 		let receiptOnly = !!occurrence.receipt;
+		let journal: SessionActivityJournal | undefined;
+		let sink: DurableCyrusSessionSink | undefined;
+		const session = admission.sessionDelivery?.session;
 
 		const tools = this.options.tools(
 			() => authority,
@@ -271,6 +301,8 @@ export class AutomationRuntime {
 					const next = renewed.authority;
 					this.check(next, receiptOnly);
 					if (
+						digest(renewed.sessionDelivery ?? null) !==
+							digest(admission.sessionDelivery ?? null) ||
 						checkpointKey(next) !== key ||
 						next.attemptId !== initial.attemptId ||
 						next.fence !== initial.fence ||
@@ -305,6 +337,9 @@ export class AutomationRuntime {
 					scopeKey: key,
 					sequence: 0,
 					status: "running",
+					...(admission.sessionDelivery && {
+						sessionDelivery: admission.sessionDelivery,
+					}),
 					messages: [
 						{
 							role: "user",
@@ -315,12 +350,47 @@ export class AutomationRuntime {
 				await this.options.store.save(state);
 			}
 			if (
+				digest(state.sessionDelivery ?? null) !==
+				digest(admission.sessionDelivery ?? null)
+			)
+				throw new Error("Session delivery changed across checkpoint recovery");
+			if (session && this.options.sessions) {
+				journal = new SessionActivityJournal(
+					this.options.sessions.directory,
+					authority.definition.workspaceId,
+					key,
+				);
+				sink = new DurableCyrusSessionSink(
+					journal,
+					this.options.sessions.transport,
+					async (sessionId) => {
+						if (sessionId !== session.id)
+							throw new Error("Foreign session delivery denied");
+						await fresh();
+						return {
+							contractVersion: 1,
+							instanceId: this.instanceId,
+							...identity(authority),
+						};
+					},
+					() => [...this.options.sessions!.secrets(), credential.token],
+				);
+				await sink.createCyrusSession(session);
+				await sink.flush(controller.signal);
+			}
+			if (
 				(receiptOnly || authority.phase === "reconcile") &&
 				state.pending?.step.type !== "result"
 			)
 				throw new Error("No terminal result to reconcile");
-			// A terminal checkpoint only retransmits its immutable result. Never reopen model/progress.
+			// A terminal checkpoint only replays immutable session items/result. Never reopen model/progress.
 			if (state.pending?.step.type !== "result") {
+				if (session && sink)
+					await sink.updateCyrusSession(
+						session.id,
+						{ status: AgentSessionStatus.Active },
+						"started",
+					);
 				await fresh();
 				await this.options.gateway.call(
 					"progress",
@@ -354,15 +424,27 @@ export class AutomationRuntime {
 					occurrence.receipt ??= { definition, scopeKey: key, attempts: 1 };
 					receiptOnly = true;
 				}
-				await this.perform(state, authority, tools, controller.signal, fresh);
+				await this.perform(
+					state,
+					authority,
+					tools,
+					controller.signal,
+					fresh,
+					sink,
+					session?.id,
+				);
 				if (state.status === "completed") return;
 			}
 		} finally {
 			controller.abort();
 			clearTimeout(leaseTimer);
 			clearInterval(poll);
-			await tools.close();
-			this.active.delete(key);
+			try {
+				await tools.close();
+			} finally {
+				journal?.close();
+				this.active.delete(key);
+			}
 		}
 	}
 	private async perform(
@@ -371,10 +453,31 @@ export class AutomationRuntime {
 		tools: ScopedAutomationTools,
 		signal: AbortSignal,
 		fresh: () => Promise<void>,
+		sink?: DurableCyrusSessionSink,
+		sessionId?: string,
 	): Promise<void> {
 		const pending = state.pending!;
 		await fresh();
 		if (pending.step.type === "result") {
+			if (sink && sessionId) {
+				await sink.postActivity(
+					sessionId,
+					{
+						type: AgentActivityType.Response,
+						body: pending.step.text.slice(0, 32768),
+					},
+					undefined,
+					`${pending.key}:response`,
+				);
+				await sink.updateCyrusSession(
+					sessionId,
+					{ status: AgentSessionStatus.Complete },
+					`${pending.key}:complete`,
+				);
+				// An unacknowledged activity must never be stranded by hosted completion.
+				await sink.flush(signal);
+			}
+			await fresh();
 			const ack = z
 				.object({
 					contractVersion: z.literal(1),
@@ -405,7 +508,37 @@ export class AutomationRuntime {
 			return;
 		}
 		authorizeTool(authority, pending.step.call);
-		const result = await tools.call(pending.step.call, pending.key, signal);
+		if (sink && sessionId)
+			await sink.postActivity(
+				sessionId,
+				{
+					type: AgentActivityType.Action,
+					action: pending.step.call.name,
+					parameter: JSON.stringify(pending.step.call.arguments),
+					result: null,
+				},
+				undefined,
+				`${pending.key}:start`,
+			);
+		if (!pending.result) {
+			pending.result = automationToolOutputSchema.parse(
+				await tools.call(pending.step.call, pending.key, signal),
+			);
+			await this.options.store.save(state);
+		}
+		const result = pending.result;
+		if (sink && sessionId)
+			await sink.postActivity(
+				sessionId,
+				{
+					type: AgentActivityType.Action,
+					action: pending.step.call.name,
+					parameter: JSON.stringify(pending.step.call.arguments),
+					result: JSON.stringify(result).slice(0, 32768),
+				},
+				undefined,
+				`${pending.key}:result`,
+			);
 		await fresh();
 		state.messages.push(
 			{ role: "assistant", content: JSON.stringify(pending.step) },

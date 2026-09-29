@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { HttpSessionDeliveryTransport } from "../sinks/SessionDeliveryTransport.js";
 import { AutomationRuntime } from "./AutomationRuntime.js";
 import { AutomationCheckpointStore } from "./CheckpointStore.js";
 import { registrationSchema } from "./contract.js";
@@ -152,6 +153,10 @@ export function registerConfiguredAutomations(
 	getConfig: () => {
 		defaultRunner?: string;
 		claudeDefaultModel?: string;
+		codexDefaultModel?: string;
+		geminiDefaultModel?: string;
+		cursorDefaultModel?: string;
+		opencodeDefaultModel?: string;
 		defaultModel?: string;
 	},
 ): AutomationRuntime {
@@ -159,13 +164,28 @@ export function registerConfiguredAutomations(
 	const origin = getCyrusAppUrl();
 	const configuration = (): ConfiguredAutomationModel => {
 		const config = getConfig();
+		const harness =
+			process.env.CYRUS_DEFAULT_RUNNER || config.defaultRunner || "claude";
+		const selectedModel =
+			harness === "codex"
+				? process.env.CYRUS_CODEX_DEFAULT_MODEL || config.codexDefaultModel
+				: harness === "gemini"
+					? process.env.CYRUS_GEMINI_DEFAULT_MODEL || config.geminiDefaultModel
+					: harness === "cursor"
+						? process.env.CYRUS_CURSOR_DEFAULT_MODEL ||
+							config.cursorDefaultModel
+						: harness === "opencode"
+							? process.env.CYRUS_OPENCODE_DEFAULT_MODEL ||
+								config.opencodeDefaultModel
+							: harness === "claude"
+								? process.env.CYRUS_CLAUDE_DEFAULT_MODEL ||
+									config.claudeDefaultModel
+								: undefined;
 		return {
-			harness:
-				process.env.CYRUS_DEFAULT_RUNNER || config.defaultRunner || "claude",
+			harness,
 			model:
-				process.env.CYRUS_CLAUDE_DEFAULT_MODEL ||
+				selectedModel ||
 				process.env.CYRUS_DEFAULT_MODEL ||
-				config.claudeDefaultModel ||
 				config.defaultModel ||
 				"",
 			apiKey: process.env.ANTHROPIC_API_KEY,
@@ -175,10 +195,14 @@ export function registerConfiguredAutomations(
 	let gateway: AutomationGateway;
 	let gatewayError: string | null = null;
 	try {
-		gateway = new AutomationHttpGateway(origin, () => ({
-			apiKey: process.env.CYRUS_API_KEY || "",
-			workspaceId: pairedWorkspace,
-		}));
+		gateway = new AutomationHttpGateway(
+			origin,
+			() => ({
+				apiKey: process.env.CYRUS_API_KEY || "",
+				workspaceId: pairedWorkspace,
+			}),
+			true,
+		);
 	} catch {
 		gatewayError =
 			"Configured control plane requires HTTPS for contained automations";
@@ -203,6 +227,25 @@ export function registerConfiguredAutomations(
 		workspaceId: () => pairedWorkspace,
 		gateway,
 		ledger,
+		...(pairedWorkspace &&
+			!gatewayError && {
+				sessions: {
+					directory: join(cyrusHome, "automation-session-journal-v1"),
+					transport: new HttpSessionDeliveryTransport(origin, () => ({
+						workspaceId: process.env.CYRUS_TEAM_ID || "",
+						apiKey: process.env.CYRUS_API_KEY || "",
+					})),
+					secrets: () =>
+						[
+							process.env.CYRUS_API_KEY,
+							process.env.CLOUDFLARE_TOKEN,
+							process.env.ANTHROPIC_API_KEY,
+							process.env.CLAUDE_CODE_OAUTH_TOKEN,
+							process.env.OPENAI_API_KEY,
+							process.env.CODEX_API_KEY,
+						].filter((v): v is string => !!v),
+				},
+			}),
 		tools: (authority, credential, signal) =>
 			new ScopedAutomationMcpClient(origin, authority, credential, signal),
 		model: new ConfiguredAutomationMessagesModel(configuration),

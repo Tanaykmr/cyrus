@@ -77,6 +77,7 @@ export class DurableCyrusSessionSink implements ICyrusSessionSink {
 		sessionId: string,
 		content: AgentActivityContent,
 		options?: ActivityPostOptions,
+		sourceKey?: string,
 	): Promise<ActivityPostResult> {
 		const payload = { content, ...(options && { options }) };
 		// Validate JSON before walking/redacting; no custom SDK objects or accessors.
@@ -85,16 +86,25 @@ export class DurableCyrusSessionSink implements ICyrusSessionSink {
 			content: AgentActivityContent;
 			options?: ActivityPostOptions;
 		};
-		this.journal.append(sessionId, { kind: "activity", payload: redacted });
+		this.journal.append(
+			sessionId,
+			{ kind: "activity", payload: redacted },
+			sourceKey,
+		);
 		await this.flush().catch(() => undefined); // Durable item remains; no acknowledgement is fabricated.
 		return {};
 	}
 	async updateCyrusSession(
 		sessionId: string,
 		update: SessionLifecycleUpdate,
+		sourceKey?: string,
 	): Promise<void> {
 		this.assertPrivateIdentity(update);
-		this.journal.append(sessionId, { kind: "lifecycle", payload: update });
+		this.journal.append(
+			sessionId,
+			{ kind: "lifecycle", payload: update },
+			sourceKey,
+		);
 		await this.flush().catch(() => undefined);
 	}
 	private assertPrivateIdentity(value: unknown): void {

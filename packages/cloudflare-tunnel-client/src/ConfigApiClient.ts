@@ -23,6 +23,7 @@ export interface ConfigApiResponse {
 	config?: {
 		cloudflareToken: string;
 		apiKey: string;
+		teamId?: string;
 	};
 	error?: string;
 }
@@ -92,6 +93,18 @@ export class ConfigApiClient {
 				};
 			}
 
+			if (
+				data.config.teamId !== undefined &&
+				(typeof data.config.teamId !== "string" ||
+					!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(
+						data.config.teamId,
+					))
+			) {
+				return {
+					success: false,
+					error: "Invalid workspace identity in config response",
+				};
+			}
 			return data;
 		} catch {
 			return {

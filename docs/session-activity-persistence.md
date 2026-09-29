@@ -5,8 +5,8 @@ the [automation contract](runtime-automations-v1.md), its single SQLite schedule
 current-authority checks, contained MCP connections or terminal receipt recovery.
 Hosted accepted the delivery path/envelope in coordination comment
 `d15d1384-5393-4440-ada6-2217d57c63c8`. Shared exported types and strict validators
-now live in `packages/edge-worker/src/sinks/session-delivery.ts`. There is no
-enabled hosted activity transport in this runtime milestone. The bounded signal
+now live in `packages/edge-worker/src/sinks/session-delivery.ts`. Registered automations negotiate and use this transport as described below; native
+harness and child execution acceptance remains open. The bounded signal
 metadata subset below was accepted in comment `3f8623c3-609a-4199-9e9e-31f549be1b47`.
 
 ## Identity and delegation
@@ -145,7 +145,8 @@ Owned children never call the legacy parent-resume callback: that callback may
 launch an unscoped runner. Child response plus terminal lifecycle and the admitted
 parent relationship provide the persisted result; hosted must wake the parent via
 its authorized binding/outbox into the same generic runtime occurrence ledger.
-That parent wakeup and automatic reconnect flush are not yet wired here. Likewise,
+That parent wakeup remains to be integrated. Registered root occurrences now flush
+their journal on reconnect and before result completion. Likewise,
 native harness stream re-emission needs a stable source-event cursor/dedup policy;
 transport retry idempotency alone does not prove native-session resume coverage.
 
@@ -153,8 +154,11 @@ The production classes are tested together over actual HTTP with a controlled
 receiver and SQLite, including normalizer replay, missing ACK, changed attempt,
 revocation, bad ACK, separate customer/workspace journals, redaction and both
 optional-ticket shapes. No live Codex process or hosted SQL/UI is claimed by
-those tests. Registered execution integration awaits the agreed optional
-`sessionDelivery` admission field and hosted current-authority handler.
+those tests. Registered root execution now negotiates the agreed optional
+`sessionDelivery` field using `X-Cyrus-Session-Delivery: 1`, pins its descriptor in
+checkpoints, emits stable step-keyed normalized actions/results/lifecycle, and
+requires exact final ACKs before `/result`. The new registered F1 is controlled
+transport evidence; actual hosted SQL/UI and native Codex remain separate gates.
 
 ## Acceptance still required
 

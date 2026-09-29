@@ -22,6 +22,8 @@ const output = [];
 const fixture = Fastify({ forceCloseConnections: true });
 let runtimeServer;
 let runtimeOrigin;
+const team = "11111111-1111-4111-8111-111111111111";
+let bootstrapRequests = 0;
 let authRequests = 0;
 let launchCount = 0;
 try {
@@ -32,14 +34,40 @@ try {
 		authRequests++;
 		return {
 			success: true,
-			config: { apiKey: "f1-runtime-key", cloudflareToken: "f1-tunnel-token" },
+			config: {
+				apiKey: "f1-runtime-key",
+				cloudflareToken: "f1-tunnel-token",
+				teamId: team,
+			},
+		};
+	});
+	fixture.get("/api/config/runtime", async (request) => {
+		assert.equal(request.headers.authorization, "Bearer f1-runtime-key");
+		assert.equal(request.headers["x-cyrus-team-id"], team);
+		bootstrapRequests++;
+		return {
+			success: true,
+			bootstrap: {
+				contractVersion: 1,
+				teamId: team,
+				cyrusConfig: {
+					repositories: [],
+					defaultRunner: "claude",
+					claudeDefaultModel: "claude-fixture",
+				},
+				environment: { CYRUS_TEAM_ID: team, ANTHROPIC_API_KEY: "f1-model-key" },
+			},
 		};
 	});
 	const fixtureOrigin = await fixture.listen({ port: 0, host: "127.0.0.1" });
 	globalThis.fetch = async (url, init) => {
-		if (String(url) === `${preview}/api/config`) {
+		if (
+			[`${preview}/api/config`, `${preview}/api/config/runtime`].includes(
+				String(url),
+			)
+		) {
 			assert.equal(init.redirect, "error");
-			return originalFetch(`${fixtureOrigin}/api/config`, init);
+			return originalFetch(`${fixtureOrigin}${new URL(url).pathname}`, init);
 		}
 		if (
 			runtimeOrigin &&
@@ -49,11 +77,16 @@ try {
 		throw new Error("F1 denied unexpected external transport");
 	};
 	process.env.CYRUS_APP_URL = `${preview}/`;
-	process.env.CYRUS_TEAM_ID = "f1-existing-workspace";
-	process.env.CYRUS_DEFAULT_RUNNER = "claude";
-	process.env.CYRUS_CLAUDE_DEFAULT_MODEL = "claude-fixture";
-	process.env.ANTHROPIC_API_KEY = "f1-model-key";
-	delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+	// Fresh pairing must obtain workspace/model config from authenticated bootstrap.
+	for (const name of [
+		"CYRUS_TEAM_ID",
+		"CYRUS_DEFAULT_RUNNER",
+		"CYRUS_DEFAULT_MODEL",
+		"CYRUS_CLAUDE_DEFAULT_MODEL",
+		"ANTHROPIC_API_KEY",
+		"CLAUDE_CODE_OAUTH_TOKEN",
+	])
+		delete process.env[name];
 	await writeFile(
 		join(directory, ".env"),
 		"CYRUS_APP_URL=https://app.atcyrus.com\n",
@@ -69,15 +102,22 @@ try {
 		cyrusHome: directory,
 		version: "f1-source-build",
 		logger,
-		config: { load: () => ({ repositories: [] }) },
+		config: {
+			load: () =>
+				JSON.parse(
+					require("node:fs").readFileSync(
+						join(directory, "config.json"),
+						"utf8",
+					),
+				),
+		},
 		worker: {
 			startEdgeWorker: async () => {
 				assert.equal(process.env.CYRUS_APP_URL, `${preview}/`);
 				runtimeServer = Fastify({ forceCloseConnections: true });
-				registerConfiguredAutomations(runtimeServer, directory, () => ({
-					defaultRunner: "claude",
-					claudeDefaultModel: "claude-fixture",
-				}));
+				registerConfiguredAutomations(runtimeServer, directory, () =>
+					app.config.load(),
+				);
 				runtimeOrigin = await runtimeServer.listen({
 					port: 0,
 					host: "127.0.0.1",
@@ -96,7 +136,7 @@ try {
 	assert.equal(response.status, 200);
 	const capabilities = await response.json();
 	assert.equal(capabilities.available, true);
-	assert.equal(capabilities.workspaceId, "f1-existing-workspace");
+	assert.equal(capabilities.workspaceId, team);
 	assert.equal(capabilities.capabilities.scopedMcp, true);
 	assert.equal(capabilities.capabilities.engineering, false);
 	assert.equal(
@@ -106,7 +146,7 @@ try {
 	assert.equal((await stat(join(directory, ".env"))).mode & 0o777, 0o600);
 	assert.match(
 		await readFile(join(directory, ".env"), "utf8"),
-		/CYRUS_APP_URL=https:\/\/cyrus-preview-cyhost-1321.vercel.app\n/,
+		/CYRUS_APP_URL='https:\/\/cyrus-preview-cyhost-1321.vercel.app'\n/,
 	);
 	for (const secret of [
 		"f1-pairing-code",
@@ -116,9 +156,11 @@ try {
 	])
 		assert.equal(output.join("\n").includes(secret), false);
 	assert.equal(authRequests, 1);
+	assert.equal(bootstrapRequests, 1);
 	assert.equal(launchCount, 1);
 	const summary = {
 		passed: true,
+		bootstrapRequests,
 		authRequests,
 		launchCount,
 		previewOrigin: preview,

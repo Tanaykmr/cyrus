@@ -70,7 +70,7 @@ export class AuthCommand extends BaseCommand {
 CLOUDFLARE_TOKEN=${configResponse.config!.cloudflareToken}
 CYRUS_API_KEY=${configResponse.config!.apiKey}
 CYRUS_APP_URL=${getCyrusAppUrl()}
-CYRUS_SETUP_PENDING=true
+${configResponse.config!.teamId ? `CYRUS_TEAM_ID=${configResponse.config!.teamId}\n` : ""}CYRUS_SETUP_PENDING=true
 `;
 
 			const envFile = openSync(
@@ -89,6 +89,8 @@ CYRUS_SETUP_PENDING=true
 			}
 			this.logSuccess(`Credentials saved to ${envPath}`);
 
+			// Never carry an old workspace into a newly paired credential.
+			delete process.env.CYRUS_TEAM_ID;
 			// Reload environment variables to pick up CYRUS_SETUP_PENDING
 			loadRuntimeEnv(envPath);
 
