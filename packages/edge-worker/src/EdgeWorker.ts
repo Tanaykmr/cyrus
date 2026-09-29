@@ -154,6 +154,7 @@ import { ActivityPoster } from "./ActivityPoster.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
 import { AttachmentService } from "./AttachmentService.js";
+import { registerConfiguredAutomations } from "./automations/register.js";
 import type { ChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 import type { ChatSessionHandlerDeps } from "./ChatSessionHandler.js";
@@ -904,6 +905,11 @@ export class EdgeWorker extends EventEmitter {
 
 		// Register config update routes
 		this.configUpdater.register();
+		registerConfiguredAutomations(
+			this.sharedApplicationServer.getFastifyInstance(),
+			this.cyrusHome,
+			() => this.config,
+		);
 
 		this.logger.info("✅ Config updater registered");
 		this.logger.info(

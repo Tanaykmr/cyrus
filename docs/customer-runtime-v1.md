@@ -1,7 +1,10 @@
 # Customer runtime v1 (CYPACK-1546 / CYHOST-1321)
 
-Status: hosted owner is integrating the v1 wire contract; the renewal/result
-clarifications below are coordinated in CYHOST-1321. No published minimum
+Status: **historical standalone containment contract**, superseded as the product
+execution path by [registered runtime automations](runtime-automations-v1.md).
+Do not provision this endpoint or configure its global model path for customer
+onboarding. Preserve it for isolation/reconciliation regression evidence.
+No published minimum
 `cyrus-ai` version exists yet. Do not infer support from the current package version.
 Hosted must require successful versioned capability discovery; a 404, old runtime,
 unknown version, or unavailable isolation backend must fail dispatch closed.

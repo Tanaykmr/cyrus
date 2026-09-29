@@ -16,6 +16,7 @@ export type {
 	AskUserQuestionHandlerDeps,
 } from "./AskUserQuestionHandler.js";
 export { AskUserQuestionHandler } from "./AskUserQuestionHandler.js";
+export { registerConfiguredAutomations } from "./automations/register.js";
 export type { ChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 export { LiveChatRepositoryProvider } from "./ChatRepositoryProvider.js";
 export type {

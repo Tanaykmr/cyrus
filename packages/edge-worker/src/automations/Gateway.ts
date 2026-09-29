@@ -1,0 +1,61 @@
+import { readBoundedJson } from "../customer-runtime/Gateway.js";
+
+export type AutomationEndpoint = "authorize" | "progress" | "result";
+export interface AutomationGateway {
+	call(
+		endpoint: AutomationEndpoint,
+		body: Record<string, unknown>,
+		signal: AbortSignal,
+	): Promise<unknown>;
+}
+
+/** Existing paired-runtime authentication; never exposed to model/tool arguments. */
+export class AutomationHttpGateway implements AutomationGateway {
+	private readonly origin: string;
+	constructor(
+		origin: string,
+		private readonly credentials: () => { apiKey: string; workspaceId: string },
+	) {
+		const url = new URL(origin);
+		if (
+			url.protocol !== "https:" ||
+			url.username ||
+			url.password ||
+			url.pathname !== "/" ||
+			url.search ||
+			url.hash
+		) {
+			throw new Error("Automation authority requires a fixed HTTPS origin");
+		}
+		this.origin = url.origin;
+	}
+	async call(
+		endpoint: AutomationEndpoint,
+		body: Record<string, unknown>,
+		signal: AbortSignal,
+	): Promise<unknown> {
+		const { apiKey, workspaceId } = this.credentials();
+		if (!apiKey || !workspaceId) throw new Error("Runtime is not paired");
+		const response = await fetch(
+			`${this.origin}/api/automations/v1/${endpoint}`,
+			{
+				method: "POST",
+				redirect: "error",
+				signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${apiKey}`,
+					"X-Cyrus-Team-Id": workspaceId,
+				},
+				body: JSON.stringify({ ...body, contractVersion: 1 }),
+			},
+		);
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new Error(
+				`Automation authority denied request (${response.status})`,
+			);
+		}
+		return readBoundedJson(response, 2_000_000);
+	}
+}

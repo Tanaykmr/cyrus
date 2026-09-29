@@ -5,7 +5,7 @@ This changelog documents internal development changes, refactors, tooling update
 ## [Unreleased]
 
 ### Changed
-- Made the scoped-runtime local artifact builder and installed-package provenance checks available for independent CI rebuilds, with explicit unpublished provenance and pinned platform image guidance. ([CYPACK-1546](https://linear.app/ceedar/issue/CYPACK-1546), [#1507](https://github.com/cyrusagents/cyrus/pull/1507))
+- Made runtime artifact/provenance tooling available for independent CI, and added generic automation persistence/MCP/F1 regressions. Raised the existing ip-address override floor to10.5.1 (resolved10.7.2): SDK's express-rate-limit still pins vulnerable10.1.0, including through current SDK1.31.0, so a direct SDK bump cannot remove the deep override yet. ([CYPACK-1546](https://linear.app/ceedar/issue/CYPACK-1546), [#1507](https://github.com/cyrusagents/cyrus/pull/1507))
 - Added an explicit npm test-channel mode to the main-only trusted CLI release workflow: immutable candidate provenance, unprivileged build/install jobs, inspected 17-package OIDC publication with lifecycle scripts disabled, exact registry recovery/integrity checks and unchanged stable tags. ([CYPACK-1502](https://linear.app/ceedar/issue/CYPACK-1502), [#1502](https://github.com/cyrusagents/cyrus/pull/1502))
 - Switched builds, type checking, and development watch commands to the native TypeScript compiler, reducing measured local build time by 74% and type-check time by 68%. Prompt-assembly tests now use mock Linear trackers reliably, preventing network-dependent CI timeouts. ([CYPACK-1520](https://linear.app/ceedar/issue/CYPACK-1520), [#1485](https://github.com/cyrusagents/cyrus/pull/1485))
 

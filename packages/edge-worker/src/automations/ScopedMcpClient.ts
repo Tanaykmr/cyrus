@@ -1,0 +1,183 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+	type AutomationAuthority,
+	type AutomationToolCall,
+	authorizeTool,
+	type McpCredential,
+	permittedToolNames,
+	scopedToolResult,
+} from "./contract.js";
+
+export interface ScopedAutomationTools {
+	call(
+		call: AutomationToolCall,
+		idempotencyKey: string,
+		signal: AbortSignal,
+	): Promise<unknown>;
+	/** Serialize server-side credential rotation with complete MCP operations. */
+	renew(operation: () => Promise<void>): Promise<void>;
+	close(): Promise<void>;
+}
+
+/** One client per admitted attempt. Never reads global MCP config or supervisor credentials. */
+export class ScopedAutomationMcpClient implements ScopedAutomationTools {
+	private client?: Client;
+	private transport?: StreamableHTTPClientTransport;
+	private names = new Set<string>();
+	private connectedCredential?: McpCredential;
+	private queue: Promise<unknown> = Promise.resolve();
+	private exclusive<T>(operation: () => Promise<T>): Promise<T> {
+		const next = this.queue.then(operation);
+		this.queue = next.catch(() => {});
+		return next;
+	}
+	renew(operation: () => Promise<void>): Promise<void> {
+		return this.exclusive(operation);
+	}
+	private readonly url: URL;
+	constructor(
+		origin: string,
+		private readonly authority: () => AutomationAuthority,
+		private readonly credential: () => McpCredential,
+		private readonly signal: AbortSignal,
+	) {
+		const url = new URL(origin);
+		if (
+			url.protocol !== "https:" ||
+			url.pathname !== "/" ||
+			url.username ||
+			url.password ||
+			url.search ||
+			url.hash
+		)
+			throw new Error("Invalid scoped MCP origin");
+		this.url = new URL("/mcp", url);
+	}
+	private async connect(credential: McpCredential): Promise<Client> {
+		if (
+			this.client &&
+			(this.connectedCredential?.token !== credential.token ||
+				this.connectedCredential?.grantId !== credential.grantId)
+		)
+			await this.disconnect();
+		if (this.client) return this.client;
+		const client = new Client({
+			name: "cyrus-contained-automation",
+			version: "1",
+		});
+		const transport = new StreamableHTTPClientTransport(this.url, {
+			reconnectionOptions: {
+				maxRetries: 0,
+				initialReconnectionDelay: 1000,
+				maxReconnectionDelay: 1000,
+				reconnectionDelayGrowFactor: 1,
+			},
+			fetch: async (url, init) => {
+				if (String(url) !== this.url.href)
+					throw new Error("MCP transport origin changed");
+				if (
+					credential.audience !== "/mcp" ||
+					Date.parse(credential.expiresAt) <= Date.now()
+				)
+					throw new Error("Scoped MCP credential expired");
+				this.signal.throwIfAborted();
+				const headers = new Headers(init?.headers);
+				headers.set("Authorization", `Bearer ${credential.token}`);
+				const response = await fetch(this.url, {
+					...init,
+					redirect: "error",
+					headers,
+					signal: AbortSignal.any([
+						this.signal,
+						...(init?.signal ? [init.signal] : []),
+						AbortSignal.timeout(20_000),
+					]),
+				});
+				if (!response.body) return response;
+				let bytes = 0;
+				const body = response.body.pipeThrough(
+					new TransformStream<Uint8Array, Uint8Array>({
+						transform(chunk, controller) {
+							bytes += chunk.byteLength;
+							if (bytes > 2_000_000)
+								throw new Error("Scoped MCP response limit exceeded");
+							controller.enqueue(chunk);
+						},
+					}),
+				);
+				return new Response(body, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers,
+				});
+			},
+		});
+		try {
+			await client.connect(transport, { signal: this.signal, timeout: 20_000 });
+			const list = await client.listTools(undefined, {
+				signal: this.signal,
+				timeout: 20_000,
+			});
+			if (
+				list.nextCursor ||
+				list.tools.length > 2 ||
+				list.tools.some(
+					(tool) => !permittedToolNames(this.authority()).includes(tool.name),
+				)
+			)
+				throw new Error("Unscoped MCP tool catalog");
+			this.names = new Set(list.tools.map((tool) => tool.name));
+			this.client = client;
+			this.transport = transport;
+			this.connectedCredential = credential;
+			return client;
+		} catch {
+			await client.close().catch(() => {});
+			throw new Error("Scoped MCP initialization denied");
+		}
+	}
+	async call(
+		call: AutomationToolCall,
+		idempotencyKey: string,
+		signal: AbortSignal,
+	): Promise<unknown> {
+		return this.exclusive(async () => {
+			const authority = this.authority();
+			const credential = { ...this.credential() };
+			authorizeTool(authority, call);
+			if (authority.definition.grants[0]?.id !== credential.grantId)
+				throw new Error("MCP grant identity mismatch");
+			try {
+				const client = await this.connect(credential);
+				if (!this.names.has(call.name))
+					throw new Error("MCP tool absent from scoped catalog");
+				const result = await client.callTool(
+					{ ...call, _meta: { idempotencyKey } },
+					undefined,
+					{ signal, timeout: 20_000 },
+				);
+				if (result.isError || !result.structuredContent)
+					throw new Error("Scoped MCP tool denied");
+				return scopedToolResult(authority, call, result.structuredContent);
+			} catch {
+				// Uncertain operations remain checkpointed. Next admitted attempt reconnects
+				// with the same operation key; it never retries a send under broader authority.
+				await this.disconnect();
+				throw new Error("Scoped MCP operation interrupted");
+			}
+		});
+	}
+	async close(): Promise<void> {
+		return this.exclusive(() => this.disconnect());
+	}
+	private async disconnect(): Promise<void> {
+		const transport = this.transport;
+		this.transport = undefined;
+		const client = this.client;
+		this.client = undefined;
+		// Local close only. Completion/revocation may already prohibit protocol DELETE.
+		await client?.close().catch(() => {});
+		await transport?.close().catch(() => {});
+	}
+}
