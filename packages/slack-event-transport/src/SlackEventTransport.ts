@@ -331,10 +331,25 @@ export class SlackEventTransport extends EventEmitter {
 			return;
 		}
 
+		// A `message` that @mentions the bot is always accompanied by an
+		// app_mention for the same (channel, ts), and only the app_mention can
+		// start a session in an unbound thread. Slack delivers the two in no
+		// guaranteed order, so if the message twin arrived first it would claim
+		// the de-dup key below and the app_mention would be discarded — losing
+		// the mention. Drop the twin here, before it records the key, and let the
+		// app_mention handle the message.
+		if (event.type === "message" && this.mentionsBot(envelope, event)) {
+			this.logger.debug(
+				`Ignoring Slack message that mentions the bot; its app_mention handles it (${event.channel}:${event.ts})`,
+			);
+			reply.code(200).send({ success: true, ignored: true });
+			return;
+		}
+
 		// Slack delivers both an app_mention and a message event for a single
 		// message that mentions the bot. De-duplicate on (channel, ts) so the
-		// thread only gets prompted once. The first event to arrive wins; both
-		// carry identical text.
+		// thread only gets prompted once. Mention twins are dropped above, so
+		// this is a backstop for when the bot's user ID isn't in the envelope.
 		const dedupKey = `${event.channel}:${event.ts}`;
 		if (this.isDuplicateMessage(dedupKey)) {
 			this.logger.debug(
@@ -399,6 +414,25 @@ export class SlackEventTransport extends EventEmitter {
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Whether a `message` event's text @mentions the bot, using the bot user
+	 * ID(s) from the envelope's `authorizations`. Returns false when the
+	 * envelope carries no bot authorization.
+	 */
+	private mentionsBot(
+		envelope: SlackEventEnvelope,
+		event: SlackMessageEvent,
+	): boolean {
+		const text = event.text ?? "";
+		return (envelope.authorizations ?? []).some(
+			(auth) =>
+				auth.is_bot === true &&
+				!!auth.user_id &&
+				(text.includes(`<@${auth.user_id}>`) ||
+					text.includes(`<@${auth.user_id}|`)),
+		);
 	}
 
 	private isDuplicateMessage(key: string): boolean {

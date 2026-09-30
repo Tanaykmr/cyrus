@@ -4,8 +4,10 @@ import { SlackEventTransport } from "../src/SlackEventTransport.js";
 import type { SlackEventTransportConfig } from "../src/types.js";
 import {
 	testEventEnvelope,
+	testThreadedAppMentionEvent,
 	testThreadedEventEnvelope,
 	testThreadedMessageEnvelope,
+	testThreadedMessageEvent,
 	testUrlVerificationEnvelope,
 } from "./fixtures.js";
 
@@ -543,6 +545,73 @@ describe("SlackEventTransport", () => {
 				success: true,
 				ignored: true,
 			});
+		});
+
+		it("still emits the app_mention when its message twin arrives first", async () => {
+			const eventListener = vi.fn();
+			transport.on("event", eventListener);
+
+			const handler = mockFastify.routes["/slack-webhook"]!;
+			const authorizations = [{ user_id: "U0BOT1234", is_bot: true }];
+
+			// The message twin of the mention (same channel:ts) arrives first.
+			const mentionMessageEnvelope = {
+				...testThreadedMessageEnvelope,
+				authorizations,
+				event: {
+					...testThreadedMessageEvent,
+					text: testThreadedAppMentionEvent.text,
+					ts: testThreadedAppMentionEvent.ts,
+					event_ts: testThreadedAppMentionEvent.event_ts,
+				},
+			};
+			const twinReply = createMockReply();
+			await handler(
+				createMockRequest(mentionMessageEnvelope, {
+					authorization: `Bearer ${testSecret}`,
+				}),
+				twinReply,
+			);
+			expect(eventListener).not.toHaveBeenCalled();
+			expect(twinReply.send).toHaveBeenCalledWith({
+				success: true,
+				ignored: true,
+			});
+
+			// The app_mention arrives second and must not be dropped as a duplicate.
+			await handler(
+				createMockRequest(
+					{ ...testThreadedEventEnvelope, authorizations },
+					{ authorization: `Bearer ${testSecret}` },
+				),
+				createMockReply(),
+			);
+			expect(eventListener).toHaveBeenCalledTimes(1);
+			expect(eventListener).toHaveBeenCalledWith(
+				expect.objectContaining({ eventType: "app_mention" }),
+			);
+		});
+
+		it("still emits a plain follow-up message when the bot is not mentioned", async () => {
+			const eventListener = vi.fn();
+			transport.on("event", eventListener);
+
+			const handler = mockFastify.routes["/slack-webhook"]!;
+			await handler(
+				createMockRequest(
+					{
+						...testThreadedMessageEnvelope,
+						authorizations: [{ user_id: "U0BOT1234", is_bot: true }],
+					},
+					{ authorization: `Bearer ${testSecret}` },
+				),
+				createMockReply(),
+			);
+
+			expect(eventListener).toHaveBeenCalledTimes(1);
+			expect(eventListener).toHaveBeenCalledWith(
+				expect.objectContaining({ eventType: "message" }),
+			);
 		});
 	});
 
