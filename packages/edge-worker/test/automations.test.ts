@@ -21,6 +21,7 @@ import {
 	digest,
 	permittedToolNames,
 	scopedToolResult,
+	scopedToolSchemas,
 	toolCallSchema,
 } from "../src/automations/contract.js";
 import { AutomationLedger } from "../src/automations/Ledger.js";
@@ -509,6 +510,103 @@ it("reports the selected Codex model without borrowing Claude aliases or claimin
 		);
 	} finally {
 		await app.close();
+	}
+});
+
+it("aborts an active read-set model when existing-session authority is revoked without renewing it", async () => {
+	const db = await ledger();
+	const d = definition();
+	db.upsert(d);
+	const occurrence = db.enqueue(
+		d.id,
+		1,
+		"read-set-revocation",
+		"Read current issues",
+	);
+	let modelStarted = false,
+		modelAborted = false,
+		admissions = 0,
+		probes = 0,
+		results = 0;
+	const runtime = new AutomationRuntime({
+		workspaceId: () => d.workspaceId,
+		ledger: db,
+		store: new AutomationCheckpointStore(await directory()),
+		readiness: () => ({ ...d.target, reason: null }),
+		renewMilliseconds: 10,
+		model: {
+			async next(_messages, _authority, signal) {
+				modelStarted = true;
+				return await new Promise<never>((_resolve, reject) => {
+					const abort = () => {
+						modelAborted = true;
+						reject(new Error("Model aborted"));
+					};
+					signal.addEventListener("abort", abort, { once: true });
+					if (signal.aborted) abort();
+				});
+			},
+		},
+		tools: () => ({
+			async call() {
+				throw new Error("No provider call expected");
+			},
+			async close() {},
+			async renew(operation) {
+				await operation();
+			},
+			async revalidate() {
+				probes++;
+				if (modelStarted) throw new Error("Current grant revoked");
+			},
+		}),
+		gateway: {
+			async call(endpoint, body) {
+				if (endpoint === "authorize") {
+					admissions++;
+					return {
+						authority: authority({
+							definition: {
+								...d,
+								grants: [
+									{
+										...authority().definition.grants[0]!,
+										resource: {
+											provider: "linear",
+											customerId: "00000000-0000-4000-8000-000000000001",
+										},
+										permissions: ["read"],
+									},
+								],
+							},
+							occurrenceId: occurrence.id,
+							attemptId: String(body.attemptId),
+							fence: Number(body.fence),
+							input: occurrence.input,
+						}),
+						mcp: {
+							token: "fixture-credential-not-a-live-secret",
+							audience: "/mcp",
+							grantId: "bound-grant",
+							expiresAt: new Date(Date.now() + 60000).toISOString(),
+						},
+					};
+				}
+				if (endpoint === "result") results++;
+				return {};
+			},
+		},
+	});
+	try {
+		expect(runtime.capabilities().capabilities.customerReadSet).toBe(true);
+		await runtime.wake();
+		expect(modelAborted).toBe(true);
+		expect(admissions).toBe(1);
+		expect(probes).toBeGreaterThanOrEqual(2);
+		expect(results).toBe(0);
+		expect(db.status(d.id).occurrences[0]?.status).toBe("queued");
+	} finally {
+		await runtime.stop();
 	}
 });
 
@@ -1128,4 +1226,143 @@ it("keeps one write identity when native reconnect or repeated model calls repea
 	} finally {
 		await runtime.stop();
 	}
+});
+
+describe("customer-derived opaque reference tools", () => {
+	const customerId = "12345678-1234-4123-8123-123456789abc";
+	const reference = "22345678-1234-4123-8123-123456789abc";
+	function customerAuthority() {
+		const a = authority();
+		a.definition.grants[0]!.resource = { provider: "linear", customerId };
+		a.definition.grants[0]!.permissions = ["read", "write", "delegate"];
+		return a;
+	}
+	it("admits the authenticated customer resource and exposes only scoped read/delegation schemas", () => {
+		const a = customerAuthority();
+		expect(definitionSchema.parse(a.definition)).toEqual(a.definition);
+		expect(permittedToolNames(a)).toEqual([
+			"list_issues",
+			"get_issue",
+			"delegate_investigation",
+		]);
+		for (const call of [
+			{ name: "list_issues", arguments: {} },
+			{ name: "get_issue", arguments: { reference } },
+			{
+				name: "delegate_investigation",
+				arguments: {
+					reference,
+					instruction: "Investigate",
+					tracking: "direct",
+				},
+			},
+			{
+				name: "delegate_investigation",
+				arguments: {
+					reference,
+					instruction: "Investigate",
+					tracking: "assigned_ticket",
+				},
+			},
+		])
+			expect(() => authorizeTool(a, call)).not.toThrow();
+		const schemas = scopedToolSchemas(a);
+		expect(
+			schemas
+				.find((s) => s.shape.name.value === "get_issue")!
+				.shape.arguments.safeParse({}).success,
+		).toBe(false);
+		expect(
+			schemas
+				.find((s) => s.shape.name.value === "get_issue")!
+				.shape.arguments.parse({ reference }),
+		).toEqual({ reference });
+		expect(() =>
+			authorizeTool(a, {
+				name: "add_comment",
+				arguments: { text: "unauthorized" },
+			}),
+		).toThrow();
+	});
+	it("denies forged authority/provider selectors, fixed-resource reference widening and worker delegation", () => {
+		const a = customerAuthority();
+		for (const field of [
+			"customerId",
+			"workspaceId",
+			"connectionId",
+			"issueId",
+			"teamId",
+			"grantId",
+			"runId",
+			"role",
+		])
+			for (const name of ["list_issues", "get_issue"])
+				expect(() =>
+					authorizeTool(a, {
+						name,
+						arguments: {
+							...(name === "get_issue" ? { reference } : {}),
+							[field]: customerId,
+						},
+					}),
+				).toThrow();
+		expect(() =>
+			authorizeTool(a, {
+				name: "get_issue",
+				arguments: { reference: "provider-id" },
+			}),
+		).toThrow();
+		expect(() =>
+			authorizeTool(authority(), {
+				name: "get_issue",
+				arguments: { reference },
+			}),
+		).toThrow();
+		expect(() =>
+			authorizeTool(authority(), { name: "list_issues", arguments: {} }),
+		).toThrow();
+		expect(() =>
+			authorizeTool(a, { name: "get_issue", arguments: {} }),
+		).toThrow();
+		a.definition.role = "investigator";
+		expect(permittedToolNames(a)).toEqual(["list_issues", "get_issue"]);
+		expect(() =>
+			authorizeTool(a, {
+				name: "delegate_investigation",
+				arguments: { reference, instruction: "x", tracking: "direct" },
+			}),
+		).toThrow();
+	});
+	it("retains exact grant/customer/account checks on read-set results", () => {
+		const a = customerAuthority(),
+			g = a.definition.grants[0]!;
+		const call = { name: "list_issues" as const, arguments: {} };
+		const item = {
+			grantId: g.id,
+			connectionId: g.connectionId,
+			accountId: g.accountId,
+			resource: g.resource,
+			text: JSON.stringify({
+				issues: [{ reference, identifier: "FIX-1" }],
+				held: 0,
+			}),
+		};
+		const result = { items: [item], nextCursor: null };
+		expect(scopedToolResult(a, call, result)).toEqual({
+			items: [{ text: item.text }],
+			nextCursor: null,
+		});
+		for (const patch of [
+			{ resource: { provider: "linear", customerId: reference } },
+			{ grantId: "foreign" },
+			{ accountId: "foreign" },
+			{ resource: { provider: "linear", teamId: "t", issueId: "i" } },
+		])
+			expect(() =>
+				scopedToolResult(a, call, {
+					...result,
+					items: [{ ...item, ...patch }],
+				}),
+			).toThrow();
+	});
 });

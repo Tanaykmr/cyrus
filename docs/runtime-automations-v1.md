@@ -159,9 +159,11 @@ Lease/token times are ISO8601 UTC; token cannot outlive lease. Authority identit
 must match registration/claim. Each resource grant is `{id,connectionId,accountId,
 resource,permissions}`. `id` is stable per occurrence and equals `mcp.grantId` and returned `items[].grantId`.
 Only the token hash/expiry rotates; a grant identity change during renewal is denied.
-Resource is `{provider:"linear",teamId,issueId}` or
-`{provider:"slack",channelId,threadTs}`. First slice supports 0/1 bound resource;
-multi-resource references are not implemented/advertised. Permissions read/write/delegate do
+Resource is `{provider:"linear",teamId,issueId}`,
+`{provider:"slack",channelId,threadTs}`, or the negotiated customer read-set binding
+`{provider:"linear",customerId:<UUID>}`. Each occurrence supports 0/1 authenticated
+binding. A customer read-set binding enumerates session-confined issue references;
+Hosted derives the current issue set from verified provider associations. Permissions read/write/delegate do
 not bypass coordinator role or Hosted approval. The delegate permission is returned only
 when both delegation and session-delivery negotiation headers are present. Hosted renews only current ownership,
 revision, policy/account state. Changing authority requires a new definition revision.
@@ -196,8 +198,42 @@ Thread-bound catalog: `read_messages({limit?,cursor?})`, `reply({text})`.
 Issue-bound catalog: `get_issue({})`, `add_comment({text})`.
 Read limit is 1..100, cursor bounded 2000 chars, text 1..10000 chars. All objects strict.
 No workspace/customer/account/connection/channel/thread/issue/role/run/grant/action
-or resource-ref argument. Search/list, aliases, HTTP/shell and absent tools deny.
-Future multiple-resource support needs explicit reviewed session-bound opaque references.
+argument. Arbitrary provider IDs, aliases, HTTP/shell and absent tools deny.
+
+### Customer-derived read sets
+
+Runtime advertises `customerReadSet:true` and sends `X-Cyrus-Customer-Read-Set:1`
+on authorize/renew. Hosted must gate this resource variant on negotiation; old
+runtimes cannot parse or dispatch it. Published Hosted contract
+`0e37517391a930c83ff42a24f80b332b1ee82c10` defines `list_issues({})` and
+`get_issue({reference:<UUID>})`. Fixed issue `get_issue({})` remains unchanged.
+All schemas reject undeclared fields. The model sees no customer ID or provider ID.
+The standard result envelope retains the authenticated customer binding; its
+`text` for list is JSON `{issues:[{reference,identifier}],held}`. Runtime validates
+this shape and remembers references only within the initialized MCP connection.
+Hosted checks current grant and provider association before returning content.
+
+References expire on credential rotation/reconnect. While the existing lease and
+token have more than 15 seconds remaining, runtime's current-authority checks
+(including the 5-second poll and model/activity boundaries) use authenticated SDK
+`tools/list`. The published Hosted handler revalidates current run, registration
+owner, grant, policy, mapping/account and session on this request. This is an
+authorization probe, not a lease extension. At the renewal threshold the existing
+authorize flow rotates the credential; the exclusive MCP queue serializes this
+with in-flight calls. The original absolute expiry timer remains active.
+
+After reconnect an old/unissued pure-read reference yields a bounded instruction
+to call `list_issues` again, without accessing a provider. Session references are
+not restored from checkpoint text. A pending write/delegation keeps its original
+arguments and idempotency key; it is never rewritten with a newly listed reference.
+Terminal result reconciliation uses the supervisor admission path, not a completed
+MCP session. Loss of current authority stops the contained model.
+
+The customer-bound delegation schema additionally requires `reference`. Hosted's
+published slice intentionally withholds this permission until its child narrowing
+is implemented; runtime schema support is not acceptance of that future path.
+Customer read sets never expose `add_comment` or `reply`. Existing fixed-resource
+direct/ticket delegation and separate engineering authority remain unchanged.
 
 The additive delegation contract (Hosted ACK 2a712269, CYPACK ACK 4c0d3718) is
 `delegate_investigation({instruction,tracking})`. Instruction is 1..10000 characters;

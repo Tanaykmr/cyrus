@@ -12,6 +12,7 @@ import {
 	authorizeTool,
 	digest,
 	permittedToolNames,
+	scopedToolSchemas,
 	toolCallSchema,
 } from "../../packages/edge-worker/dist/automations/contract.js";
 import { AutomationHttpGateway } from "../../packages/edge-worker/dist/automations/Gateway.js";
@@ -63,6 +64,10 @@ export async function runAutomationDrive({
 	const engineeringAssignments = new Map();
 	const engineeringPublications = new Map();
 	const engineeringReceiptId = randomUUID();
+	const readSetCustomerId = randomUUID();
+	const readSetReferences = new Map();
+	let readSetRotated = false;
+	let readSetContentReads = 0;
 	let engineeringCalls = 0;
 	let lostEngineeringAck = false;
 	let lostDelegationAck = false;
@@ -151,8 +156,9 @@ export async function runAutomationDrive({
 			)
 				return denied(reply);
 			const provider = d.instruction.includes("slack") ? "slack" : "linear";
-			const resource =
-				provider === "linear"
+			const resource = d.id.startsWith("read-set-")
+				? { provider: "linear", customerId: readSetCustomerId }
+				: provider === "linear"
 					? { provider, teamId: "team-a", issueId: `issue-${d.namespace}` }
 					: { provider, channelId: "channel-a", threadTs: "123.456" };
 			const resourceGrant = {
@@ -174,19 +180,26 @@ export async function runAutomationDrive({
 					request.headers["x-cyrus-session-delivery"] !== "1")
 			)
 				return denied(reply);
+			if (d.id.startsWith("read-set-"))
+				assert.equal(request.headers["x-cyrus-customer-read-set"], "1");
 			const authority = {
 				contractVersion: 1,
-				definition: { ...d, grants: engineering ? [] : [resourceGrant] },
+				definition: {
+					...d,
+					grants: engineering || d.id === "source-free" ? [] : [resourceGrant],
+				},
 				occurrenceId: b.occurrenceId,
 				attemptId: b.attemptId,
 				fence: b.fence,
-				leaseUntil: new Date(Date.now() + 90000).toISOString(),
+				leaseUntil: new Date(
+					Date.now() + (d.id === "read-set-rotate" ? 21000 : 90000),
+				).toISOString(),
 				phase: results.has(b.occurrenceId) ? "reconcile" : "execute",
 				input: b.occurrence.input,
 			};
 			const grantId = resourceGrant.id,
 				token = `fixture-${randomUUID()}-${randomUUID()}`,
-				until = Date.now() + 60000;
+				until = Date.now() + (d.id === "read-set-rotate" ? 20000 : 60000);
 			if (previous) previous.revoked = true;
 			grants.set(token, {
 				authority: { ...authority, ...(engineering && { engineering }) },
@@ -230,7 +243,23 @@ export async function runAutomationDrive({
 			);
 			assert.equal(
 				sessionItems.length,
-				engineeringAssignments.has(d.id) ? 11 : codexImage ? 7 : 6,
+				d.id.startsWith("read-set-")
+					? d.id === "read-set-rotate"
+						? codexImage
+							? 15
+							: 14
+						: codexImage
+							? 11
+							: 10
+					: engineeringAssignments.has(d.id)
+						? 11
+						: d.id === "source-free"
+							? codexImage
+								? 5
+								: 4
+							: codexImage
+								? 7
+								: 6,
 			);
 			assert.equal(sessionItems.at(-1).item.payload.status, "complete");
 			const previous = results.get(b.occurrenceId);
@@ -352,6 +381,28 @@ export async function runAutomationDrive({
 					.length
 			: request.body.messages.filter((m) => m.role === "assistant").length;
 		const engineering = text.includes("Reviewed technical brief:");
+		const readSet = text.includes("read-set-rotate")
+			? "read-set-rotate"
+			: text.includes("read-set-normal")
+				? "read-set-normal"
+				: null;
+		const readSetReads = [0, 1].filter((i) =>
+			text.includes(`Read-set issue body ${i}`),
+		).length;
+		const lastOutput = codexImage
+			? request.body.input
+					.filter((m) => m.type === "function_call_output")
+					.at(-1)
+			: request.body.messages.at(-1);
+		const relist =
+			readSet &&
+			(outputs === 0 ||
+				JSON.stringify(lastOutput).includes("Call list_issues"));
+		if (readSet === "read-set-rotate" && outputs === 1 && !readSetRotated) {
+			readSetRotated = true;
+			await new Promise((resolve) => setTimeout(resolve, 6500));
+		}
+
 		if (engineering && outputs === 1)
 			assert.ok(
 				text.includes("ERR_ASSERTION"),
@@ -362,40 +413,60 @@ export async function runAutomationDrive({
 				text.includes("# pass 1"),
 				"native model receives passing repair diagnostics",
 			);
-		const replied = outputs >= (engineering ? 3 : tracking ? 2 : 1);
-		const name = engineering
-			? outputs < 2
-				? "execute"
-				: "publish_artifact"
-			: tracking
-				? "delegate_investigation"
-				: (
-							codexImage
-								? request.body.tools.some((t) => t.name === "read_messages")
-								: request.body.system.includes(
-										'Available names: ["read_messages"]',
-									)
-						)
-					? "read_messages"
-					: "get_issue";
-		const toolArguments = engineering
-			? outputs === 0
-				? { command: "printf retained > retained.txt; node --test" }
-				: outputs === 1
+		const sourceFree = codexImage
+			? request.body.tools.length === 0
+			: request.body.system.includes("Available names: [].");
+		const replied =
+			sourceFree ||
+			(readSet
+				? readSetReads === 2
+				: outputs >= (engineering ? 3 : tracking ? 2 : 1));
+		const name = readSet
+			? relist
+				? "list_issues"
+				: "get_issue"
+			: engineering
+				? outputs < 2
+					? "execute"
+					: "publish_artifact"
+				: tracking
+					? "delegate_investigation"
+					: (
+								codexImage
+									? request.body.tools.some((t) => t.name === "read_messages")
+									: request.body.system.includes(
+											'Available names: ["read_messages"]',
+										)
+							)
+						? "read_messages"
+						: "get_issue";
+		const toolArguments = readSet
+			? relist || replied
+				? {}
+				: { reference: readSetReferences.get(readSet)[readSetReads] }
+			: engineering
+				? outputs === 0
+					? { command: "printf retained > retained.txt; node --test" }
+					: outputs === 1
+						? {
+								command:
+									"printf 'exports.sum=(a,b)=>a+b;' > sum.cjs; node --test",
+							}
+						: {
+								title: "Repair addition",
+								summary: "Synthetic reproduction passes",
+							}
+				: tracking
 					? {
-							command:
-								"printf 'exports.sum=(a,b)=>a+b;' > sum.cjs; node --test",
+							instruction: "Investigate the bound source and return findings",
+							tracking,
 						}
-					: {
-							title: "Repair addition",
-							summary: "Synthetic reproduction passes",
-						}
-			: tracking
-				? {
-						instruction: "Investigate the bound source and return findings",
-						tracking,
-					}
-				: {};
+					: {};
+		if (readSet && !relist && !replied)
+			assert.ok(
+				text.includes(toolArguments.reference),
+				"model uses only a reference in its received conversation",
+			);
 		if (codexImage) {
 			const item = replied
 				? {
@@ -493,10 +564,11 @@ export async function runAutomationDrive({
 				onsessioninitialized: (id) => sessions.set(id, session),
 			});
 			session = { server, transport, grantId: grant.grantId };
+			const issuedReferences = new Map();
 			for (const name of permittedToolNames(grant.authority).filter(
 				(name) => name !== "execute",
 			)) {
-				const schema = toolCallSchema.options.find(
+				const schema = scopedToolSchemas(grant.authority).find(
 					(schema) => schema.shape.name.value === name,
 				).shape.arguments;
 				server.registerTool(
@@ -602,6 +674,43 @@ export async function runAutomationDrive({
 							};
 						}
 						const g = grant.authority.definition.grants[0];
+						if (d.id.startsWith("read-set-")) {
+							let text;
+							if (name === "list_issues") {
+								const issues = [0, 1].map((i) => {
+									const reference = randomUUID();
+									issuedReferences.set(reference, i);
+									return { reference, identifier: `FIX-${i + 1}` };
+								});
+								readSetReferences.set(
+									d.id,
+									issues.map((i) => i.reference),
+								);
+								text = JSON.stringify({ issues, held: 1 });
+							} else {
+								assert.ok(
+									issuedReferences.has(args.reference),
+									"reference belongs to this exact session",
+								);
+								readSetContentReads++;
+								text = `Read-set issue body ${issuedReferences.get(args.reference)}`;
+							}
+							return {
+								content: [],
+								structuredContent: {
+									items: [
+										{
+											grantId: grant.grantId,
+											connectionId: g.connectionId,
+											accountId: g.accountId,
+											resource: g.resource,
+											text,
+										},
+									],
+									nextCursor: null,
+								},
+							};
+						}
 						const structuredContent = {
 							items: [
 								{
@@ -783,6 +892,14 @@ export async function runAutomationDrive({
 				.status,
 			401,
 		);
+		const discovery = await realFetch(
+			`${runtimeOrigin}/api/automations/v1/capabilities`,
+			{
+				headers: { authorization: `Bearer ${supervisorKey}` },
+			},
+		);
+		assert.equal(discovery.status, 200);
+		assert.equal((await discovery.json()).capabilities.customerReadSet, true);
 		assert.equal(
 			(await call("wake", { contractVersion: 1, customerId: "evil" }))
 				.statusCode,
@@ -1164,6 +1281,58 @@ export async function runAutomationDrive({
 			"lost ACK plus repeated payloads reconcile the same two assignments",
 		);
 		assert.equal(lostDelegationAck, true);
+
+		for (const id of ["read-set-normal", "read-set-rotate"]) {
+			const d = definition(id, `scope-${id}`);
+			d.instruction = `Review both issues in ${id}`;
+			const before = counts.resultCommits;
+			await call("definitions", { contractVersion: 1, definition: d });
+			await call("occurrences", {
+				...event,
+				automationId: d.id,
+				eventId: `event-${id}`,
+				input: "Review currently accessible issues",
+			});
+			await until(() => counts.resultCommits === before + 1, 30000);
+			await until(
+				() => ledger.status(id).occurrences[0].status === "completed",
+			);
+		}
+		assert.equal(readSetContentReads, 4);
+		assert.equal(readSetRotated, true);
+		{
+			const d = definition("source-free", "customer-source-free");
+			d.instruction =
+				"Reply naturally to this internal greeting without external sources";
+			const before = {
+				results: counts.resultCommits,
+				tools: counts.tools,
+				initialize: counts.initialize,
+			};
+			await call("definitions", { contractVersion: 1, definition: d });
+			await call("occurrences", {
+				...event,
+				automationId: d.id,
+				eventId: "internal-greeting",
+				input: "hi!",
+			});
+			await until(() => counts.resultCommits === before.results + 1);
+			await until(
+				() => ledger.status(d.id).occurrences[0].status === "completed",
+			);
+			assert.equal(counts.tools, before.tools);
+			assert.equal(counts.initialize, before.initialize);
+			const response = [...activityReceipts.values()].find(
+				(e) =>
+					e.item.kind === "activity" &&
+					e.item.sessionId.startsWith("automation:source-free:") &&
+					e.item.payload.content.type === "response",
+			);
+			assert.ok(
+				response,
+				"source-free model result persists through the same session sink",
+			);
+		}
 		if (codexImage) {
 			const id = randomUUID();
 			const d = definition(id, `engineering:${id}`);
@@ -1265,6 +1434,10 @@ export async function runAutomationDrive({
 			target,
 			...(codexImage && { containedImage: codexImage }),
 			activityReceipts: activityReceipts.size,
+			readSets: {
+				contentReads: readSetContentReads,
+				rotationRelist: readSetRotated,
+			},
 			engineering: {
 				assignments: engineeringAssignments.size,
 				publications: engineeringPublications.size,
@@ -1286,6 +1459,8 @@ export async function runAutomationDrive({
 						]
 					: []),
 				"instruction through registered HTTP routes",
+				"customer read-set list/two reads through one current SDK session; forced lease renewal invalidates references and model re-lists before reading",
+				"source-free contained model reply with zero grants, no MCP initialization and durable normalized response/result",
 				"model-facing direct/ticket delegation through SDK MCP, stable payload identity across lost ACK/new attempt/repeated native calls, exactly one child per request",
 				"direct and assigned-ticket child descriptors, parent linkage and separate durable activity journals",
 				"negotiated durable normalized session activities, lost activity ACK, terminal flush before result and receipt-only reconnect",
@@ -1305,7 +1480,7 @@ export async function runAutomationDrive({
 			limitations: [
 				"Hosted authority/provider/model transports are controlled fixtures; real hosted connected gate still required",
 				"No live provider or model calls; actual signature/subscription/mapping proof is Hosted-owned",
-				"Single-bound Linear/Slack tools; multi-resource grants unavailable",
+				"Customer read sets use controlled session references; live association/mapping validation remains Hosted-owned",
 				...(codexImage
 					? [
 							"Engineering publication receipt is a controlled MCP fixture, not a live GitHub write or hosted SQL proof",

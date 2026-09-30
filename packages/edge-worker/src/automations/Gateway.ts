@@ -46,6 +46,9 @@ export class AutomationHttpGateway implements AutomationGateway {
 				signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
 				headers: {
 					"Content-Type": "application/json",
+					...(endpoint === "authorize"
+						? { "X-Cyrus-Customer-Read-Set": "1" }
+						: {}),
 					Authorization: `Bearer ${apiKey}`,
 					"X-Cyrus-Team-Id": workspaceId,
 					...(endpoint === "authorize" && this.sessionDelivery

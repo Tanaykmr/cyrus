@@ -1,9 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { z } from "zod";
 import {
 	type AutomationAuthority,
 	type AutomationToolCall,
 	authorizeTool,
+	isCustomerReadSet,
 	type McpCredential,
 	permittedToolNames,
 	scopedToolResult,
@@ -22,6 +24,8 @@ export interface ScopedAutomationTools {
 	): Promise<unknown>;
 	/** Serialize server-side credential rotation with complete MCP operations. */
 	renew(operation: () => Promise<void>): Promise<void>;
+	/** Current authority check on the admitted SDK session; never extends its lease. */
+	revalidate?(): Promise<void>;
 	close(): Promise<void>;
 }
 
@@ -31,6 +35,7 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 	private transport?: StreamableHTTPClientTransport;
 	private names = new Set<string>();
 	private connectedCredential?: McpCredential;
+	private readonly references = new Set<string>();
 	private queue: Promise<unknown> = Promise.resolve();
 	private exclusive<T>(operation: () => Promise<T>): Promise<T> {
 		const next = this.queue.then(operation);
@@ -139,20 +144,7 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 				signal: this.signal,
 				timeout: 20_000,
 			});
-			if (
-				list.nextCursor ||
-				list.tools.length >
-					permittedToolNames(this.authority()).filter(
-						(name) => name !== "execute",
-					).length ||
-				list.tools.some(
-					(tool) =>
-						tool.name === "execute" ||
-						!permittedToolNames(this.authority()).includes(tool.name),
-				)
-			)
-				throw new Error("Unscoped MCP tool catalog");
-			this.names = new Set(list.tools.map((tool) => tool.name));
+			this.admitCatalog(list);
 			this.client = client;
 			this.transport = transport;
 			this.connectedCredential = credential;
@@ -162,6 +154,43 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 			throw new Error("Scoped MCP initialization denied");
 		}
 	}
+
+	private admitCatalog(list: {
+		nextCursor?: string;
+		tools: { name: string }[];
+	}) {
+		if (
+			list.nextCursor ||
+			list.tools.length >
+				permittedToolNames(this.authority()).filter(
+					(name) => name !== "execute",
+				).length ||
+			list.tools.some(
+				(tool) =>
+					tool.name === "execute" ||
+					!permittedToolNames(this.authority()).includes(tool.name),
+			)
+		)
+			throw new Error("Unscoped MCP tool catalog");
+		this.names = new Set(list.tools.map((tool) => tool.name));
+	}
+	revalidate(): Promise<void> {
+		return this.exclusive(async () => {
+			try {
+				const client = await this.connect({ ...this.credential() });
+				this.admitCatalog(
+					await client.listTools(undefined, {
+						signal: this.signal,
+						timeout: 20_000,
+					}),
+				);
+			} catch {
+				await this.disconnect();
+				throw new Error("Scoped MCP authority unavailable");
+			}
+		});
+	}
+
 	async call(
 		call: AutomationToolCall,
 		idempotencyKey: string,
@@ -195,6 +224,24 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 				const client = await this.connect(credential);
 				if (!this.names.has(call.name))
 					throw new Error("MCP tool absent from scoped catalog");
+				// Pure reads can safely return a re-list instruction after reconnect.
+				// Uncertain delegation is never rewritten or assigned another operation key.
+				if (
+					isCustomerReadSet(authority) &&
+					call.name === "get_issue" &&
+					!(
+						"reference" in call.arguments &&
+						this.references.has(call.arguments.reference)
+					)
+				)
+					return {
+						items: [
+							{
+								text: "This reference was not issued by the current MCP session. Call list_issues and use a newly returned reference before reading.",
+							},
+						],
+						nextCursor: null,
+					};
 				const result = await client.callTool(
 					{ ...call, _meta: metadata },
 					undefined,
@@ -207,7 +254,32 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 						authority.engineering!,
 						result.structuredContent,
 					);
-				return scopedToolResult(authority, call, result.structuredContent);
+				const output = scopedToolResult(
+					authority,
+					call,
+					result.structuredContent,
+				);
+				if (isCustomerReadSet(authority) && call.name === "list_issues") {
+					const listed = z
+						.object({
+							issues: z
+								.array(
+									z
+										.object({
+											reference: z.string().uuid(),
+											identifier: z.string().max(300),
+										})
+										.strict(),
+								)
+								.max(100),
+							held: z.number().int().nonnegative(),
+						})
+						.strict();
+					for (const item of output.items)
+						for (const issue of listed.parse(JSON.parse(item.text)).issues)
+							this.references.add(issue.reference);
+				}
+				return output;
 			} catch {
 				// Uncertain operations remain checkpointed. Next admitted attempt reconnects
 				// with the same operation key; it never retries a send under broader authority.
@@ -220,6 +292,7 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 		return this.exclusive(() => this.disconnect());
 	}
 	private async disconnect(): Promise<void> {
+		this.references.clear();
 		const transport = this.transport;
 		this.transport = undefined;
 		const client = this.client;

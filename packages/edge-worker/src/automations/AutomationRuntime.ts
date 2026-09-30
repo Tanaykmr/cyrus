@@ -21,6 +21,7 @@ import {
 	digest,
 	executionAuthority,
 	identity,
+	isCustomerReadSet,
 	type McpCredential,
 	modelStepSchema,
 	registrationSchema,
@@ -107,6 +108,7 @@ export class AutomationRuntime {
 				eventInputs: true,
 				harnessStreaming: false,
 				scopedMcp: true,
+				customerReadSet: true,
 				currentAuthorityResume: true,
 				resultReconciliation: true,
 				nativeTools: false,
@@ -385,32 +387,55 @@ export class AutomationRuntime {
 		};
 		const fresh = (): Promise<void> => {
 			if (renewing) return renewing;
-			renewing = tools
-				.renew(async () => {
-					controller.signal.throwIfAborted();
-					this.check(authority, receiptOnly);
-					const renewed = await this.admit(
-						definition,
-						occurrence,
-						"renew",
-						controller.signal,
-					);
-					const next = executionAuthority(renewed);
-					this.check(next, receiptOnly);
-					if (
-						renewed.mcp.grantId !== admission.mcp.grantId ||
-						digest(renewed.sessionDelivery ?? null) !==
-							digest(admission.sessionDelivery ?? null) ||
-						checkpointKey(next) !== key ||
-						next.attemptId !== initial.attemptId ||
-						next.fence !== initial.fence ||
-						next.phase !== initial.phase
-					)
-						throw new Error("Automation authority changed");
-					authority = next;
-					credential = renewed.mcp;
-					deadline();
-				})
+			// A read-set reference belongs to this MCP session. Check current authority
+			// through Hosted's authenticated tools/list while the existing lease has
+			// time remaining; only authorize/rotate when renewal is needed. Neither
+			// this probe nor a local SQLite heartbeat extends Hosted authority.
+			const checkSession =
+				isCustomerReadSet(authority) &&
+				!receiptOnly &&
+				Math.min(
+					Date.parse(authority.leaseUntil),
+					Date.parse(credential.expiresAt),
+				) >
+					Date.now() + 15_000;
+			const refresh = checkSession
+				? async () => {
+						controller.signal.throwIfAborted();
+						this.check(authority);
+						if (!tools.revalidate)
+							throw new Error("Read-set session authorization unavailable");
+						await tools.revalidate();
+						this.check(authority);
+						this.ledger().renew(occurrence);
+					}
+				: () =>
+						tools.renew(async () => {
+							controller.signal.throwIfAborted();
+							this.check(authority, receiptOnly);
+							const renewed = await this.admit(
+								definition,
+								occurrence,
+								"renew",
+								controller.signal,
+							);
+							const next = executionAuthority(renewed);
+							this.check(next, receiptOnly);
+							if (
+								renewed.mcp.grantId !== admission.mcp.grantId ||
+								digest(renewed.sessionDelivery ?? null) !==
+									digest(admission.sessionDelivery ?? null) ||
+								checkpointKey(next) !== key ||
+								next.attemptId !== initial.attemptId ||
+								next.fence !== initial.fence ||
+								next.phase !== initial.phase
+							)
+								throw new Error("Automation authority changed");
+							authority = next;
+							credential = renewed.mcp;
+							deadline();
+						});
+			renewing = refresh()
 				.catch((error) => {
 					controller.abort();
 					throw error;

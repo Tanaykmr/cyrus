@@ -10,7 +10,7 @@ import {
 	type AutomationAuthority,
 	type AutomationStep,
 	authorizeTool,
-	permittedToolNames,
+	scopedToolSchemas,
 	toolCallSchema,
 } from "./contract.js";
 import type { AutomationModel, AutomationModelContext } from "./Model.js";
@@ -173,28 +173,29 @@ class ContainedCodexTurn implements AutomationModel {
 						path,
 					});
 				} else {
-					const names = permittedToolNames(authority);
 					const thread = await runner.request<{ thread: { id: string } }>(
 						"thread/start",
 						{
 							...target,
 							ephemeral: false,
 							historyMode: "legacy",
-							dynamicTools: toolCallSchema.options
-								.filter((schema) => names.includes(schema.shape.name.value))
-								.map((schema) => ({
-									type: "function",
-									name: schema.shape.name.value,
-									description:
-										schema.shape.name.value === "execute"
-											? "Run a command in the private isolated engineering workspace. Inspect diagnostics and exit status, repair ordinary test failures and rerun."
-											: schema.shape.name.value === "publish_artifact"
-												? "Publish the current reviewed-path workspace snapshot to the fixed repository and branch. No deployment is authorized."
-												: schema.shape.name.value === "delegate_investigation"
-													? "Ask a child investigator to examine the bound source. Tracking links the already-bound ticket or creates a direct child; it does not create or assign a provider ticket."
-													: "Operate only on the resource bound to this connection",
-									inputSchema: z.toJSONSchema(schema.shape.arguments),
-								})),
+							dynamicTools: scopedToolSchemas(authority).map((schema) => ({
+								type: "function",
+								name: schema.shape.name.value,
+								description:
+									schema.shape.name.value === "execute"
+										? "Run a command in the private isolated engineering workspace. Inspect diagnostics and exit status, repair ordinary test failures and rerun."
+										: schema.shape.name.value === "publish_artifact"
+											? "Publish the current reviewed-path workspace snapshot to the fixed repository and branch. No deployment is authorized."
+											: schema.shape.name.value === "delegate_investigation"
+												? "Ask a child investigator to examine the bound source. Tracking links the already-bound ticket or creates a direct child; it does not create or assign a provider ticket."
+												: schema.shape.name.value === "list_issues"
+													? "List the currently accessible issues and session-only references. Re-list after reconnect or reference expiry."
+													: schema.shape.name.value === "get_issue"
+														? "Read the bound issue or use an opaque reference issued by list_issues in this connection. Never supply provider IDs."
+														: "Operate only on the resource bound to this connection",
+								inputSchema: z.toJSONSchema(schema.shape.arguments),
+							})),
 						},
 					);
 					this.threadId = thread.thread.id;

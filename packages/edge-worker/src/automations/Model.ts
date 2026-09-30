@@ -9,7 +9,7 @@ import {
 	type AutomationStep,
 	modelStepSchema,
 	permittedToolNames,
-	toolCallSchema,
+	scopedToolSchemas,
 } from "./contract.js";
 
 export interface AutomationModelContext {
@@ -70,9 +70,9 @@ export class ConfiguredAutomationMessagesModel implements AutomationModel {
 			);
 		}
 		const permitted = permittedToolNames(authority);
-		const schemas = toolCallSchema.options
-			.filter((schema) => permitted.includes(schema.shape.name.value))
-			.map((schema) => z.toJSONSchema(schema));
+		const schemas = scopedToolSchemas(authority).map((schema) =>
+			z.toJSONSchema(schema),
+		);
 		const response = await fetch("https://api.anthropic.com/v1/messages", {
 			method: "POST",
 			redirect: "error",
@@ -86,7 +86,7 @@ export class ConfiguredAutomationMessagesModel implements AutomationModel {
 				model: config.model,
 				max_tokens: 4096,
 				messages,
-				system: `Execute the assigned automation. Return only JSON: {"type":"result","text":"findings"} or {"type":"tool","call":...}. Tools follow the scoped MCP call schema ${JSON.stringify(schemas.length ? { oneOf: schemas } : false)}. Available names: ${JSON.stringify(permitted)}. The connection is bound to one resource. Role: ${authority.definition.role}. The server enforces write approval and exact payload. Delegation tracking only links a server-admitted child to the already-bound ticket or creates a direct child; it does not create or assign a provider ticket. Report limitations honestly.`,
+				system: `Execute the assigned automation. Return only JSON: {"type":"result","text":"findings"} or {"type":"tool","call":...}. Tools follow the scoped MCP call schema ${JSON.stringify(schemas.length ? { oneOf: schemas } : false)}. Available names: ${JSON.stringify(permitted)}. The connection is bound to authenticated resources. If list_issues is available, obtain session references with it before get_issue; only references issued by that connection may be used. Re-list after reconnect or reference expiry. Role: ${authority.definition.role}. The server enforces write approval and exact payload. Delegation tracking only links a server-admitted child to the already-bound ticket or creates a direct child; it does not create or assign a provider ticket. Report limitations honestly.`,
 			}),
 		});
 		if (!response.ok) {

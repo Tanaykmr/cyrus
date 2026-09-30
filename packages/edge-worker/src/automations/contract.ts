@@ -16,11 +16,14 @@ const id = z
 	.max(200)
 	.regex(/^[a-zA-Z0-9_.:-]+$/);
 const instant = z.iso.datetime();
-export const resourceSchema = z.discriminatedUnion("provider", [
+export const resourceSchema = z.union([
 	z
 		.object({ provider: z.literal("slack"), channelId: id, threadTs: id })
 		.strict(),
 	z.object({ provider: z.literal("linear"), teamId: id, issueId: id }).strict(),
+	z
+		.object({ provider: z.literal("linear"), customerId: z.string().uuid() })
+		.strict(),
 ]);
 export const grantSchema = z
 	.object({
@@ -130,6 +133,12 @@ export type McpCredential = z.infer<typeof mcpCredentialSchema>;
 export const toolCallSchema = z.discriminatedUnion("name", [
 	z
 		.object({
+			name: z.literal("list_issues"),
+			arguments: z.object({}).strict(),
+		})
+		.strict(),
+	z
+		.object({
 			name: z.literal("execute"),
 			arguments: z.object({ command: z.string().min(1).max(20_000) }).strict(),
 		})
@@ -152,6 +161,7 @@ export const toolCallSchema = z.discriminatedUnion("name", [
 				.object({
 					instruction: z.string().min(1).max(10_000),
 					tracking: z.enum(["direct", "assigned_ticket"]),
+					reference: z.string().uuid().optional(),
 				})
 				.strict(),
 		})
@@ -174,7 +184,13 @@ export const toolCallSchema = z.discriminatedUnion("name", [
 		})
 		.strict(),
 	z
-		.object({ name: z.literal("get_issue"), arguments: z.object({}).strict() })
+		.object({
+			name: z.literal("get_issue"),
+			arguments: z.union([
+				z.object({}).strict(),
+				z.object({ reference: z.string().uuid() }).strict(),
+			]),
+		})
 		.strict(),
 	z
 		.object({
@@ -244,6 +260,11 @@ export function identity(authority: AutomationAuthority) {
 	};
 }
 
+export function isCustomerReadSet(authority: AutomationAuthority): boolean {
+	const resource = authority.definition.grants[0]?.resource;
+	return resource?.provider === "linear" && "customerId" in resource;
+}
+
 export function permittedToolNames(authority: AutomationAuthority): string[] {
 	if (authority.definition.role === "engineering")
 		return authority.engineering && authority.definition.grants.length === 0
@@ -252,11 +273,14 @@ export function permittedToolNames(authority: AutomationAuthority): string[] {
 	const grant = authority.definition.grants[0];
 	if (!grant) return [];
 	const names: string[] = [];
+	if (isCustomerReadSet(authority) && grant.permissions.includes("read"))
+		names.push("list_issues");
 	if (grant.permissions.includes("read"))
 		names.push(
 			grant.resource.provider === "slack" ? "read_messages" : "get_issue",
 		);
 	if (
+		!isCustomerReadSet(authority) &&
 		grant.permissions.includes("write") &&
 		authority.definition.role === "coordinator"
 	)
@@ -269,12 +293,52 @@ export function permittedToolNames(authority: AutomationAuthority): string[] {
 		names.push("delegate_investigation");
 	return names;
 }
-/** One bound resource. Arguments carry no selectors, authority IDs or approval IDs. */
+/** Model schemas select only opaque references within an authenticated read set. */
+export function scopedToolSchemas(authority: AutomationAuthority) {
+	const names = permittedToolNames(authority);
+	const readSet = isCustomerReadSet(authority);
+	return toolCallSchema.options
+		.filter((schema) => names.includes(schema.shape.name.value))
+		.map((schema) => {
+			if (schema.shape.name.value === "get_issue")
+				return z
+					.object({
+						name: z.literal("get_issue"),
+						arguments: readSet
+							? z.object({ reference: z.string().uuid() }).strict()
+							: z.object({}).strict(),
+					})
+					.strict();
+			if (schema.shape.name.value === "delegate_investigation") {
+				const args = z
+					.object({
+						instruction: z.string().min(1).max(10_000),
+						tracking: z.enum(["direct", "assigned_ticket"]),
+					})
+					.strict();
+				return z
+					.object({
+						name: z.literal("delegate_investigation"),
+						arguments: readSet
+							? args.extend({ reference: z.string().uuid() }).strict()
+							: args,
+					})
+					.strict();
+			}
+			return schema;
+		});
+}
+/** Arguments carry no authority IDs; read-set references only narrow server-issued scope. */
 export function authorizeTool(
 	authority: AutomationAuthority,
 	raw: unknown,
 ): ResourceGrant | undefined {
 	const call = toolCallSchema.parse(raw);
+	const schema = scopedToolSchemas(authority).find(
+		(s) => s.shape.name.value === call.name,
+	);
+	if (!schema) throw new Error("Automation tool denied");
+	schema.parse(call);
 	if (
 		authority.definition.role === "engineering" &&
 		permittedToolNames(authority).includes(call.name)
