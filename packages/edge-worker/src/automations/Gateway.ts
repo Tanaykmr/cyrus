@@ -16,6 +16,7 @@ export class AutomationHttpGateway implements AutomationGateway {
 		origin: string,
 		private readonly credentials: () => { apiKey: string; workspaceId: string },
 		private readonly sessionDelivery = false,
+		private readonly engineering: () => boolean = () => false,
 	) {
 		const url = new URL(origin);
 		if (
@@ -49,6 +50,11 @@ export class AutomationHttpGateway implements AutomationGateway {
 					"X-Cyrus-Team-Id": workspaceId,
 					...(endpoint === "authorize" && this.sessionDelivery
 						? { "X-Cyrus-Session-Delivery": "1", "X-Cyrus-Delegation": "1" }
+						: {}),
+					...(endpoint === "authorize" &&
+					this.sessionDelivery &&
+					this.engineering()
+						? { "X-Cyrus-Engineering": "1" }
 						: {}),
 				},
 				body: JSON.stringify({ ...body, contractVersion: 1 }),

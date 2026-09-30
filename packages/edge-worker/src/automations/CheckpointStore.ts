@@ -8,6 +8,7 @@ import {
 	modelStepSchema,
 	toolCallSchema,
 } from "./contract.js";
+import { engineeringFilesSchema } from "./Engineering.js";
 
 export const messageSchema = z
 	.object({
@@ -35,10 +36,12 @@ export const checkpointSchema = z
 				key: z.string().regex(/^[a-f0-9]{64}$/),
 				step: modelStepSchema,
 				result: automationToolOutputSchema.optional(),
+				engineeringFiles: engineeringFilesSchema.optional(),
 			})
 			.strict()
 			.optional(),
 		status: z.enum(["running", "completed"]),
+		engineeringFiles: engineeringFilesSchema.optional(),
 		sessionDelivery: admissionSchema.shape.sessionDelivery,
 		native: z
 			.object({

@@ -8,12 +8,17 @@ import {
 	permittedToolNames,
 	scopedToolResult,
 } from "./contract.js";
+import {
+	engineeringPublicationResult,
+	publicationMetadata,
+} from "./Engineering.js";
 
 export interface ScopedAutomationTools {
 	call(
 		call: AutomationToolCall,
 		idempotencyKey: string,
 		signal: AbortSignal,
+		engineeringFiles?: Record<string, string>,
 	): Promise<unknown>;
 	/** Serialize server-side credential rotation with complete MCP operations. */
 	renew(operation: () => Promise<void>): Promise<void>;
@@ -136,9 +141,14 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 			});
 			if (
 				list.nextCursor ||
-				list.tools.length > permittedToolNames(this.authority()).length ||
+				list.tools.length >
+					permittedToolNames(this.authority()).filter(
+						(name) => name !== "execute",
+					).length ||
 				list.tools.some(
-					(tool) => !permittedToolNames(this.authority()).includes(tool.name),
+					(tool) =>
+						tool.name === "execute" ||
+						!permittedToolNames(this.authority()).includes(tool.name),
 				)
 			)
 				throw new Error("Unscoped MCP tool catalog");
@@ -156,24 +166,47 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 		call: AutomationToolCall,
 		idempotencyKey: string,
 		signal: AbortSignal,
+		engineeringFiles?: Record<string, string>,
 	): Promise<unknown> {
 		return this.exclusive(async () => {
 			const authority = this.authority();
 			const credential = { ...this.credential() };
 			authorizeTool(authority, call);
-			if (authority.definition.grants[0]?.id !== credential.grantId)
+			if (
+				!authority.engineering &&
+				authority.definition.grants[0]?.id !== credential.grantId
+			)
 				throw new Error("MCP grant identity mismatch");
+			if (call.name === "execute")
+				throw new Error(
+					"Engineering commands require the local isolated executor",
+				);
+			if (engineeringFiles && call.name !== "publish_artifact")
+				throw new Error("Engineering metadata on a non-publication tool");
+			const metadata =
+				call.name === "publish_artifact"
+					? publicationMetadata(
+							authority.engineering!,
+							idempotencyKey,
+							engineeringFiles,
+						)
+					: { idempotencyKey };
 			try {
 				const client = await this.connect(credential);
 				if (!this.names.has(call.name))
 					throw new Error("MCP tool absent from scoped catalog");
 				const result = await client.callTool(
-					{ ...call, _meta: { idempotencyKey } },
+					{ ...call, _meta: metadata },
 					undefined,
 					{ signal, timeout: 20_000 },
 				);
 				if (result.isError || !result.structuredContent)
 					throw new Error("Scoped MCP tool denied");
+				if (call.name === "publish_artifact")
+					return engineeringPublicationResult(
+						authority.engineering!,
+						result.structuredContent,
+					);
 				return scopedToolResult(authority, call, result.structuredContent);
 			} catch {
 				// Uncertain operations remain checkpointed. Next admitted attempt reconnects

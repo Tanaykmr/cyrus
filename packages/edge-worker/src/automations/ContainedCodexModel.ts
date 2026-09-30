@@ -186,9 +186,13 @@ class ContainedCodexTurn implements AutomationModel {
 									type: "function",
 									name: schema.shape.name.value,
 									description:
-										schema.shape.name.value === "delegate_investigation"
-											? "Ask a child investigator to examine the bound source. Tracking links the already-bound ticket or creates a direct child; it does not create or assign a provider ticket."
-											: "Operate only on the resource bound to this connection",
+										schema.shape.name.value === "execute"
+											? "Run a command in the private isolated engineering workspace. Inspect diagnostics and exit status, repair ordinary test failures and rerun."
+											: schema.shape.name.value === "publish_artifact"
+												? "Publish the current reviewed-path workspace snapshot to the fixed repository and branch. No deployment is authorized."
+												: schema.shape.name.value === "delegate_investigation"
+													? "Ask a child investigator to examine the bound source. Tracking links the already-bound ticket or creates a direct child; it does not create or assign a provider ticket."
+													: "Operate only on the resource bound to this connection",
 									inputSchema: z.toJSONSchema(schema.shape.arguments),
 								})),
 						},

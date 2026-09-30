@@ -937,6 +937,7 @@ it.skipIf(!process.env.CYRUS_TEST_CODEX_IMAGE)(
 					model: "gpt-5.5",
 					adapter: "codex-app-server-contained-v1",
 				},
+				capabilities: { engineering: true },
 				minimumPublishedVersion: null,
 			});
 		} finally {

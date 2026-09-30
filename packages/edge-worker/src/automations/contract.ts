@@ -4,6 +4,10 @@ import {
 	cyrusSessionDescriptorSchema,
 	SESSION_DELIVERY_PATH,
 } from "../sinks/session-delivery.js";
+import {
+	type EngineeringEnvelope,
+	engineeringEnvelopeSchema,
+} from "./Engineering.js";
 
 export const AUTOMATION_VERSION = 1 as const;
 const id = z
@@ -86,7 +90,10 @@ export const authoritySchema = z
 		input: z.string().max(100_000),
 	})
 	.strict();
-export type AutomationAuthority = z.infer<typeof authoritySchema>;
+// Internal execution view; the wire puts engineering beside authority, never inside it.
+export type AutomationAuthority = z.infer<typeof authoritySchema> & {
+	engineering?: EngineeringEnvelope;
+};
 export const mcpCredentialSchema = z
 	.object({
 		token: z.string().min(32).max(8192),
@@ -98,6 +105,7 @@ export const mcpCredentialSchema = z
 export const admissionSchema = z
 	.object({
 		authority: authoritySchema,
+		engineering: engineeringEnvelopeSchema.optional(),
 		mcp: mcpCredentialSchema,
 		sessionDelivery: z
 			.object({
@@ -110,8 +118,33 @@ export const admissionSchema = z
 	})
 	.strict();
 export type AutomationAdmission = z.infer<typeof admissionSchema>;
+export function executionAuthority(
+	admission: AutomationAdmission,
+): AutomationAuthority {
+	return {
+		...admission.authority,
+		...(admission.engineering && { engineering: admission.engineering }),
+	};
+}
 export type McpCredential = z.infer<typeof mcpCredentialSchema>;
 export const toolCallSchema = z.discriminatedUnion("name", [
+	z
+		.object({
+			name: z.literal("execute"),
+			arguments: z.object({ command: z.string().min(1).max(20_000) }).strict(),
+		})
+		.strict(),
+	z
+		.object({
+			name: z.literal("publish_artifact"),
+			arguments: z
+				.object({
+					title: z.string().min(1).max(200),
+					summary: z.string().min(1).max(100_000),
+				})
+				.strict(),
+		})
+		.strict(),
 	z
 		.object({
 			name: z.literal("delegate_investigation"),
@@ -198,6 +231,7 @@ export function checkpointKey(authority: AutomationAuthority): string {
 		definition: authority.definition,
 		occurrenceId: authority.occurrenceId,
 		input: authority.input,
+		...(authority.engineering && { engineering: authority.engineering }),
 	});
 }
 export function identity(authority: AutomationAuthority) {
@@ -211,6 +245,10 @@ export function identity(authority: AutomationAuthority) {
 }
 
 export function permittedToolNames(authority: AutomationAuthority): string[] {
+	if (authority.definition.role === "engineering")
+		return authority.engineering && authority.definition.grants.length === 0
+			? ["execute", "publish_artifact"]
+			: [];
 	const grant = authority.definition.grants[0];
 	if (!grant) return [];
 	const names: string[] = [];
@@ -235,8 +273,13 @@ export function permittedToolNames(authority: AutomationAuthority): string[] {
 export function authorizeTool(
 	authority: AutomationAuthority,
 	raw: unknown,
-): ResourceGrant {
+): ResourceGrant | undefined {
 	const call = toolCallSchema.parse(raw);
+	if (
+		authority.definition.role === "engineering" &&
+		permittedToolNames(authority).includes(call.name)
+	)
+		return undefined;
 	const grant = authority.definition.grants[0];
 	if (!grant || !permittedToolNames(authority).includes(call.name)) {
 		throw new Error("Automation tool denied");
@@ -249,6 +292,7 @@ export function scopedToolResult(
 	raw: unknown,
 ) {
 	const grant = authorizeTool(authority, call);
+	if (!grant) throw new Error("Customer tool result requires a resource grant");
 	const result = toolResultSchema.parse(raw);
 	if (
 		result.items.some(

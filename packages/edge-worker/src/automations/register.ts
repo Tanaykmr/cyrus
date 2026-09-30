@@ -4,6 +4,7 @@ import { getCyrusAppUrl } from "cyrus-cloudflare-tunnel-client";
 import { CodexLoginBroker, ContainedCodexProcess } from "cyrus-codex-runner";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { DockerSandbox } from "../customer-runtime/DockerSandbox.js";
 import { HttpSessionDeliveryTransport } from "../sinks/SessionDeliveryTransport.js";
 import { AutomationRuntime } from "./AutomationRuntime.js";
 import { AutomationCheckpointStore } from "./CheckpointStore.js";
@@ -208,6 +209,8 @@ export function registerConfiguredAutomations(
 				workspaceId: pairedWorkspace,
 			}),
 			true,
+			// Protocol support also permits receipt-only recovery with an unavailable image.
+			() => true,
 		);
 	} catch {
 		gatewayError =
@@ -241,6 +244,7 @@ export function registerConfiguredAutomations(
 	};
 	let codexReason: string | null =
 		"Contained Codex image has not been configured and verified";
+	let engineeringReady = false;
 	let broker: CodexLoginBroker | undefined;
 	try {
 		broker = new CodexLoginBroker();
@@ -288,8 +292,29 @@ export function registerConfiguredAutomations(
 		} finally {
 			await probe?.close();
 		}
+		if (!codexReason) {
+			const sandbox = new DockerSandbox({
+				...codexConfig,
+				javascriptRuntime: "node",
+			});
+			try {
+				const signal = AbortSignal.timeout(15_000);
+				await sandbox.start({}, signal);
+				const result = await sandbox.execute(":", signal);
+				engineeringReady = result.exitCode === 0;
+			} catch {
+				engineeringReady = false;
+			} finally {
+				await sandbox.stop();
+			}
+		}
 	});
 	const runtime = new AutomationRuntime({
+		engineering: {
+			available: () => configuration().harness === "codex" && engineeringReady,
+			sandbox: () =>
+				new DockerSandbox({ ...codexConfig, javascriptRuntime: "node" }),
+		},
 		workspaceId: () => pairedWorkspace,
 		gateway,
 		ledger,

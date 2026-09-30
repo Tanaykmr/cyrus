@@ -38,6 +38,10 @@ const occurrenceSchema = z
 		fence: z.number().int(),
 		leaseUntil: z.number(),
 		availableAt: z.number(),
+		checkpointScope: z
+			.string()
+			.regex(/^[a-f0-9]{64}$/)
+			.optional(),
 		receipt: z
 			.object({
 				definition: registrationSchema,
@@ -345,6 +349,26 @@ export class AutomationLedger {
 				claims.push({ definition, occurrence: { ...o } });
 			}
 			return claims;
+		});
+	}
+	/** Pin admitted execution material before effects; retries cannot silently start a new scope. */
+	bindCheckpoint(claim: AutomationOccurrence, scopeKey: string): void {
+		z.string()
+			.regex(/^[a-f0-9]{64}$/)
+			.parse(scopeKey);
+		this.transact((state, now) => {
+			const o = state.occurrences[claim.id];
+			if (
+				!o ||
+				o.status !== "running" ||
+				o.attemptId !== claim.attemptId ||
+				o.fence !== claim.fence ||
+				o.leaseUntil <= now
+			)
+				throw new Error("Stale checkpoint owner");
+			if (o.checkpointScope && o.checkpointScope !== scopeKey)
+				throw new Error("Admitted checkpoint scope changed");
+			o.checkpointScope = scopeKey;
 		});
 	}
 	/** Persist before transmitting a terminal result. Receipt recovery survives edits/pause. */

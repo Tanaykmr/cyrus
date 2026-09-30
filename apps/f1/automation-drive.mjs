@@ -19,6 +19,7 @@ import { AutomationLedger } from "../../packages/edge-worker/dist/automations/Le
 import { ConfiguredAutomationMessagesModel } from "../../packages/edge-worker/dist/automations/Model.js";
 import { registerAutomationRoutes } from "../../packages/edge-worker/dist/automations/register.js";
 import { ScopedAutomationMcpClient } from "../../packages/edge-worker/dist/automations/ScopedMcpClient.js";
+import { DockerSandbox } from "../../packages/edge-worker/dist/customer-runtime/DockerSandbox.js";
 
 import { HttpSessionDeliveryTransport } from "../../packages/edge-worker/dist/sinks/SessionDeliveryTransport.js";
 import {
@@ -59,6 +60,11 @@ export async function runAutomationDrive({
 		operationReceipts = new Map();
 	const activityReceipts = new Map();
 	const delegatedChildren = new Map();
+	const engineeringAssignments = new Map();
+	const engineeringPublications = new Map();
+	const engineeringReceiptId = randomUUID();
+	let engineeringCalls = 0;
+	let lostEngineeringAck = false;
 	let lostDelegationAck = false;
 	let delegationCalls = 0;
 	let lostActivityAck = false;
@@ -161,9 +167,16 @@ export async function runAutomationDrive({
 						? ["read", "delegate"]
 						: ["read"],
 			};
+			const engineering = engineeringAssignments.get(d.id);
+			if (
+				engineering &&
+				(request.headers["x-cyrus-engineering"] !== "1" ||
+					request.headers["x-cyrus-session-delivery"] !== "1")
+			)
+				return denied(reply);
 			const authority = {
 				contractVersion: 1,
-				definition: { ...d, grants: [resourceGrant] },
+				definition: { ...d, grants: engineering ? [] : [resourceGrant] },
 				occurrenceId: b.occurrenceId,
 				attemptId: b.attemptId,
 				fence: b.fence,
@@ -176,7 +189,7 @@ export async function runAutomationDrive({
 				until = Date.now() + 60000;
 			if (previous) previous.revoked = true;
 			grants.set(token, {
-				authority,
+				authority: { ...authority, ...(engineering && { engineering }) },
 				grantId,
 				until,
 				instanceId: b.instanceId,
@@ -184,6 +197,7 @@ export async function runAutomationDrive({
 			});
 			return {
 				authority,
+				...(engineering && { engineering }),
 				...(request.headers["x-cyrus-session-delivery"] === "1" && {
 					sessionDelivery: {
 						contractVersion: 1,
@@ -214,7 +228,10 @@ export async function runAutomationDrive({
 					entry.item.sessionId ===
 					(d.session?.id ?? `automation:${d.id}:${b.occurrenceId}`),
 			);
-			assert.equal(sessionItems.length, codexImage ? 7 : 6);
+			assert.equal(
+				sessionItems.length,
+				engineeringAssignments.has(d.id) ? 11 : codexImage ? 7 : 6,
+			);
 			assert.equal(sessionItems.at(-1).item.payload.status, "complete");
 			const previous = results.get(b.occurrenceId);
 			if (previous) assert.equal(previous.key, b.idempotencyKey);
@@ -334,24 +351,51 @@ export async function runAutomationDrive({
 			? request.body.input.filter((m) => m.type === "function_call_output")
 					.length
 			: request.body.messages.filter((m) => m.role === "assistant").length;
-		const replied = outputs >= (tracking ? 2 : 1);
-		const name = tracking
-			? "delegate_investigation"
-			: (
-						codexImage
-							? request.body.tools.some((t) => t.name === "read_messages")
-							: request.body.system.includes(
-									'Available names: ["read_messages"]',
-								)
-					)
-				? "read_messages"
-				: "get_issue";
-		const toolArguments = tracking
-			? {
-					instruction: "Investigate the bound source and return findings",
-					tracking,
-				}
-			: {};
+		const engineering = text.includes("Reviewed technical brief:");
+		if (engineering && outputs === 1)
+			assert.ok(
+				text.includes("ERR_ASSERTION"),
+				"native model receives ordinary failing-test diagnostics",
+			);
+		if (engineering && outputs === 2)
+			assert.ok(
+				text.includes("# pass 1"),
+				"native model receives passing repair diagnostics",
+			);
+		const replied = outputs >= (engineering ? 3 : tracking ? 2 : 1);
+		const name = engineering
+			? outputs < 2
+				? "execute"
+				: "publish_artifact"
+			: tracking
+				? "delegate_investigation"
+				: (
+							codexImage
+								? request.body.tools.some((t) => t.name === "read_messages")
+								: request.body.system.includes(
+										'Available names: ["read_messages"]',
+									)
+						)
+					? "read_messages"
+					: "get_issue";
+		const toolArguments = engineering
+			? outputs === 0
+				? { command: "printf retained > retained.txt; node --test" }
+				: outputs === 1
+					? {
+							command:
+								"printf 'exports.sum=(a,b)=>a+b;' > sum.cjs; node --test",
+						}
+					: {
+							title: "Repair addition",
+							summary: "Synthetic reproduction passes",
+						}
+			: tracking
+				? {
+						instruction: "Investigate the bound source and return findings",
+						tracking,
+					}
+				: {};
 		if (codexImage) {
 			const item = replied
 				? {
@@ -449,7 +493,9 @@ export async function runAutomationDrive({
 				onsessioninitialized: (id) => sessions.set(id, session),
 			});
 			session = { server, transport, grantId: grant.grantId };
-			for (const name of permittedToolNames(grant.authority)) {
+			for (const name of permittedToolNames(grant.authority).filter(
+				(name) => name !== "execute",
+			)) {
 				const schema = toolCallSchema.options.find(
 					(schema) => schema.shape.name.value === name,
 				).shape.arguments;
@@ -524,6 +570,36 @@ export async function runAutomationDrive({
 								grant.until = 0;
 								throw new Error("Controlled lost delegation ACK");
 							}
+						}
+						if (name === "publish_artifact") {
+							engineeringCalls++;
+							const files = extra._meta.engineeringFiles;
+							assert.equal(files["sum.cjs"], "exports.sum=(a,b)=>a+b;");
+							assert.equal(files["retained.txt"], "retained");
+							const hash = digest({ args, files });
+							if (engineeringPublications.has(key))
+								assert.equal(engineeringPublications.get(key), hash);
+							else engineeringPublications.set(key, hash);
+							if (!lostEngineeringAck) {
+								lostEngineeringAck = true;
+								grant.revoked = true;
+								grant.until = 0;
+								throw Error("Controlled lost engineering ACK");
+							}
+							return {
+								content: [],
+								structuredContent: {
+									assignmentId: grant.authority.engineering.assignmentId,
+									status: "published",
+									receiptId: engineeringReceiptId,
+									publication: {
+										repository: grant.authority.engineering.repository,
+										number: 1,
+										url: `https://github.com/${grant.authority.engineering.repository}/pull/1`,
+										headSha: "b".repeat(40),
+									},
+								},
+							};
 						}
 						const g = grant.authority.definition.grants[0];
 						const structuredContent = {
@@ -635,7 +711,23 @@ export async function runAutomationDrive({
 					workspaceId: "workspace-a",
 				}),
 				true,
+				() => !!codexImage,
 			),
+			...(codexImage && {
+				engineering: {
+					available: () => true,
+					sandbox: () =>
+						new DockerSandbox({
+							image: codexImage,
+							dockerPath:
+								process.env.CYRUS_TEST_DOCKER_PATH || "/usr/local/bin/docker",
+							dockerHost:
+								process.env.CYRUS_TEST_DOCKER_HOST ||
+								"unix:///var/run/docker.sock",
+							javascriptRuntime: "node",
+						}),
+				},
+			}),
 			sessions: {
 				directory: join(directory, "session-journal"),
 				secrets: () => [supervisorKey, modelKey],
@@ -1072,6 +1164,63 @@ export async function runAutomationDrive({
 			"lost ACK plus repeated payloads reconcile the same two assignments",
 		);
 		assert.equal(lostDelegationAck, true);
+		if (codexImage) {
+			const id = randomUUID();
+			const d = definition(id, `engineering:${id}`);
+			d.scopeRef = d.namespace;
+			d.role = "engineering";
+			d.instruction = "Reviewed engineering assignment";
+			d.session = {
+				id: `assignment:${id}`,
+				scopeRef: d.scopeRef,
+				role: d.role,
+			};
+			const engineering = {
+				assignmentId: id,
+				repository: "fixture/calculator",
+				baseSha: "a".repeat(40),
+				headBranch: "reviewed-fix",
+				reviewId: randomUUID(),
+				generation: 1,
+				revision: 1,
+				operations: ["execute", "publish"],
+				environment: "isolated",
+				deployment: "deny",
+				technicalBrief: "Repair addition",
+				syntheticReproduction: "sum(2,3) must equal 5",
+				allowedPaths: ["sum.cjs", "sum.test.cjs", "retained.txt"],
+				files: {
+					"sum.cjs": "exports.sum=(a,b)=>a-b;",
+					"sum.test.cjs":
+						"const {test}=require('node:test'),assert=require('node:assert/strict'),{sum}=require('./sum.cjs');test('sum',()=>assert.equal(sum(2,3),5));",
+				},
+			};
+			engineeringAssignments.set(id, engineering);
+			assert.equal(
+				(await call("definitions", { contractVersion: 1, definition: d }))
+					.statusCode,
+				200,
+			);
+			const before = counts.resultCommits;
+			await call("occurrences", {
+				...event,
+				automationId: id,
+				eventId: "reviewed-assignment",
+				input: "Reviewed engineering work",
+			});
+			await until(() => counts.resultCommits === before + 1, 30000);
+			await until(
+				() => ledger.status(id).occurrences[0].status === "completed",
+			);
+			assert.equal(engineeringPublications.size, 1);
+			assert.ok(engineeringCalls >= 2);
+			assert.equal(lostEngineeringAck, true);
+			const receipt = [...activityReceipts.values()].find(
+				(e) => e.item.kind === "session" && e.item.sessionId === d.session.id,
+			);
+			assert.deepEqual(receipt.item.payload, d.session);
+		}
+
 		await runtime.stop();
 		assert.equal(
 			(
@@ -1116,6 +1265,12 @@ export async function runAutomationDrive({
 			target,
 			...(codexImage && { containedImage: codexImage }),
 			activityReceipts: activityReceipts.size,
+			engineering: {
+				assignments: engineeringAssignments.size,
+				publications: engineeringPublications.size,
+				calls: engineeringCalls,
+				lostAckRecovered: lostEngineeringAck,
+			},
 			delegation: {
 				children: delegatedChildren.size,
 				calls: delegationCalls,
@@ -1125,6 +1280,11 @@ export async function runAutomationDrive({
 			directory,
 			counts,
 			assertions: [
+				...(codexImage
+					? [
+							"reviewed assignment-only engineering: real isolated failing test, retained edit, model-directed repair/passing rerun, one immutable publication receipt across lost ACK and native reconnect",
+						]
+					: []),
 				"instruction through registered HTTP routes",
 				"model-facing direct/ticket delegation through SDK MCP, stable payload identity across lost ACK/new attempt/repeated native calls, exactly one child per request",
 				"direct and assigned-ticket child descriptors, parent linkage and separate durable activity journals",
@@ -1145,7 +1305,14 @@ export async function runAutomationDrive({
 			limitations: [
 				"Hosted authority/provider/model transports are controlled fixtures; real hosted connected gate still required",
 				"No live provider or model calls; actual signature/subscription/mapping proof is Hosted-owned",
-				"Single-bound Linear/Slack tools only; engineering lifecycle integration pending",
+				"Single-bound Linear/Slack tools; multi-resource grants unavailable",
+				...(codexImage
+					? [
+							"Engineering publication receipt is a controlled MCP fixture, not a live GitHub write or hosted SQL proof",
+						]
+					: [
+							"Engineering requires the opt-in immutable native image; not exercised by Messages-only drive",
+						]),
 			],
 		};
 		await writeFile(

@@ -251,9 +251,8 @@ transport is fixed Anthropic Messages; MCP transport is fixed Hosted /mcp. Priva
 checkpoint/ledger data are not mounted into any agent. This boundary protects against
 malicious model output, not the administrator controlling the runtime host.
 
-Engineering advertises false in this first generic slice. Historical offline Docker
-execution and receipt handling are retained for subsequent same-lifecycle delegation;
-there is no fallback from generic automation to standalone or native engineering.
+Registered engineering uses the assignment-scoped extension below. There is no
+fallback from generic automation to the historical standalone service.
 
 ## Verification and remaining gate
 
@@ -342,10 +341,85 @@ hosted creation ACK establishes the admitted parent link before the child's
 private journal accepts activities; the runtime never opens the parent's journal
 to establish that link. Findings finish the child's own result ledger; hosted
 routes them back to the parent. No Linear session or ticket is manufactured for a
-direct child. Engineering remains unavailable until separate repository/head and
-publication authority is integrated; this adapter does not grant it.
+direct child. Engineering uses a separate parentless assignment descriptor as
+described below; investigator grants confer no engineering authority.
 
 Controlled F1 now covers this native path, including direct/ticket descriptors,
 real SDK MCP, instruction/tick/event delivery, reconnect and terminal ACK replay.
 Live ChatGPT login/model transport, hosted SQL/UI reload and real assigned-ticket
 verification remain separate joint gates. No minimum published version exists.
+
+
+## Registered engineering assignment extension
+
+Hosted wire ACK 4a96a3c4 and published contract
+`c50e1b2a6c4bbf8b41f47e42cda73446059c67b5` add optional authorize-response
+`engineering`, beside (not inside) `authority`. Both `X-Cyrus-Engineering:1` and
+`X-Cyrus-Session-Delivery:1` are required. Runtime negotiates protocol support even for receipt-only recovery. It advertises
+engineering execution readiness only after the configured contained Codex adapter
+and a separate isolated engineering executor probe both succeed. No released minimum
+version exists; old runtimes receive no engineering envelope and must not execute
+an engineering definition through a legacy path.
+
+The strict envelope is `{assignmentId,repository,baseSha,headBranch,reviewId,
+generation,revision,operations:["execute","publish"],environment:"isolated",
+deployment:"deny",technicalBrief,syntheticReproduction,allowedPaths,files}`.
+Assignment/review IDs are UUIDs, base is 40 lowercase hex, generation/revision are
+positive safe integers. Brief/reproduction are each 1..20000 characters. At most
+500 unique reviewed paths are allowed; files are UTF-8 strings with at most1000
+entries and800000 total JSON bytes. Traversal, absolute paths and credential paths
+are denied. Every initial file must be explicitly allowlisted. Runtime source
+`automations/Engineering.ts` matches Hosted's frozen schema.
+
+Definition ID equals assignmentId; namespace and scopeRef are
+`engineering:<assignmentId>`, role is engineering, grants is empty and schedule
+is null. The exact session descriptor is `{id:"assignment:<assignmentId>",
+scopeRef:"engineering:<assignmentId>",role:"engineering"}`. It contains no private
+parent, customer, issue or external session association. Generic journal parent
+checks are unchanged. Hosted separately authorizes sponsor/private-parent links
+and projects the shared technical timeline into each authorized customer view.
+Withdrawal removes that customer's projection without borrowing another sponsor's
+private context or terminating unrelated sponsorships.
+
+The model receives only the reviewed technical brief/reproduction and permitted
+publication paths. Generic registration instruction and occurrence input are not
+included in the engineering model conversation. No provider/customer read or
+coordinator write/delegation tools exist in this role. The existing supervisor
+model broker and private native checkpoint remain isolated from the engineering
+computer, which receives only reviewed files through stdin, no host mounts,
+credentials, network, plugins or shared memory.
+
+Local `execute({command})` uses the reviewed Node image in a separate disposable
+engineering container. Completed nonzero exits return diagnostics and exit code,
+persist edited files, and allow repair/retest. Diagnostics are bounded and report
+truncation explicitly. Timeout, abort, output overflow and snapshot failure fail
+closed and remove the container. Current authority is revalidated before each
+operation and after execution; the independent lease deadline remains active.
+
+`publish_artifact({title,summary})` has no IDs or files in model arguments. The
+supervisor freezes the actual reviewed-path snapshot into the pending checkpoint
+before transmission and supplies only `_meta:{idempotencyKey,engineeringFiles}`.
+Operation identity includes title, summary and exact snapshot. Recovery replays
+those bytes under current authority, without a new operation identity or rerunning
+completed local commands. Hosted ACK `2d7841a9` freezes the strict response union:
+`{assignmentId,status:"published",receiptId,publication:{repository,number,url,headSha}}`
+or `{assignmentId,status:"uncertain",receiptId}`. Assignment and repository must
+match the admitted envelope. Receipt ID is the existing publication action UUID;
+number is a positive safe integer, head SHA is40 lowercase hex, and URL must equal
+`https://github.com/<repository>/pull/<number>` exactly. Extra fields are rejected.
+Only validated published receipts advance the model. Uncertain receipts, transport
+failures and malformed/foreign results leave the frozen pending operation intact;
+Hosted reconciles its existing expected-commit/branch/PR-marker ledger before
+returning success. Provider publication and private sponsor fanout stay in Hosted.
+
+The entire engineering handoff is part of the checkpoint identity. SQLite pins
+that identity to the occurrence before effects. A retry with changed generation,
+review revision, files or scope cannot create a fresh checkpoint under the same
+occurrence. Renewal additionally pins the stable MCP grant ID while allowing token
+rotation. Changes require newly admitted durable work. Terminal result ACK recovery
+uses existing receipt-only claims and ordered activity flushing, opening no model,
+sandbox or publication tool, including when the model/image is unavailable.
+
+The additive private ledger checkpointScope field is fail-closed for older strict
+readers. Rollback must disable new engineering dispatch and preserve the new ledger;
+do not point an older runtime at it or delete it to bypass pending receipts.

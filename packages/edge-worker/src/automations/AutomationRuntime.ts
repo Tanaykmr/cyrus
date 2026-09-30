@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AgentActivityType } from "@linear/sdk";
 import { AgentSessionStatus } from "cyrus-core";
 import { z } from "zod";
+import type { EngineeringSandbox } from "../customer-runtime/DockerSandbox.js";
 import { DurableCyrusSessionSink } from "../sinks/DurableCyrusSessionSink.js";
 import { SessionActivityJournal } from "../sinks/SessionActivityJournal.js";
 import type { SessionDeliveryTransport } from "../sinks/SessionDeliveryTransport.js";
@@ -18,11 +19,17 @@ import {
 	authorizeTool,
 	checkpointKey,
 	digest,
+	executionAuthority,
 	identity,
 	type McpCredential,
 	modelStepSchema,
 	registrationSchema,
 } from "./contract.js";
+import {
+	engineeringDiagnostics,
+	engineeringFilesSchema,
+	publicationFiles,
+} from "./Engineering.js";
 import type { AutomationGateway } from "./Gateway.js";
 import type { AutomationLedger, AutomationOccurrence } from "./Ledger.js";
 import type { AutomationModel } from "./Model.js";
@@ -57,6 +64,7 @@ export interface AutomationRuntimeOptions {
 	};
 	pollMilliseconds?: number;
 	renewMilliseconds?: number;
+	engineering?: { available: () => boolean; sandbox: () => EngineeringSandbox };
 }
 
 /** Runtime wake/drain engine. The storage adapter is the sole durable clock/lease authority. */
@@ -103,7 +111,8 @@ export class AutomationRuntime {
 				resultReconciliation: true,
 				nativeTools: false,
 				sharedMemory: false,
-				engineering: false,
+				engineering:
+					!!this.options.sessions && !!this.options.engineering?.available(),
 			},
 			minimumPublishedVersion: null,
 		};
@@ -210,7 +219,29 @@ export class AutomationRuntime {
 				signal,
 			),
 		);
-		const next = admission.authority;
+		const next = executionAuthority(admission);
+		const engineering = next.engineering;
+		if (next.definition.role === "engineering" || engineering) {
+			const scope = `engineering:${engineering?.assignmentId}`;
+			if (
+				!engineering ||
+				next.definition.role !== "engineering" ||
+				next.definition.grants.length ||
+				next.definition.id !== engineering.assignmentId ||
+				next.definition.namespace !== scope ||
+				next.definition.scopeRef !== scope ||
+				next.definition.schedule !== null ||
+				!admission.sessionDelivery ||
+				!this.options.sessions ||
+				digest(next.definition.session) !==
+					digest({
+						id: `assignment:${engineering.assignmentId}`,
+						scopeRef: scope,
+						role: "engineering",
+					})
+			)
+				throw new Error("Engineering assignment admission mismatch");
+		}
 		if (
 			next.definition.grants.some((grant) =>
 				grant.permissions.includes("delegate"),
@@ -225,6 +256,7 @@ export class AutomationRuntime {
 		const child = next.definition.session;
 		if (
 			child &&
+			!engineering &&
 			(!/^assignment:[a-f0-9-]{36}$/i.test(child.id) ||
 				!z.string().uuid().safeParse(child.id.slice(11)).success ||
 				!child.parentSessionId ||
@@ -288,7 +320,9 @@ export class AutomationRuntime {
 					configured.reason ||
 					authority.definition.target.harness !== configured.harness ||
 					authority.definition.target.model !== configured.model ||
-					authority.definition.role === "engineering"))
+					(authority.definition.role === "engineering" &&
+						(!authority.engineering ||
+							!this.options.engineering?.available()))))
 		)
 			throw new Error("Automation authority unavailable");
 	}
@@ -297,8 +331,9 @@ export class AutomationRuntime {
 		occurrence: AutomationOccurrence,
 		definition: AutomationRegistration,
 	): Promise<void> {
-		const initial = admission.authority;
+		const initial = executionAuthority(admission);
 		const key = checkpointKey(initial);
+		if (initial.engineering) this.ledger().bindCheckpoint(occurrence, key);
 		if (occurrence.receipt && occurrence.receipt.scopeKey !== key)
 			throw new Error("Receipt checkpoint identity changed");
 		if (this.active.has(key)) throw new Error("Occurrence already active");
@@ -310,6 +345,28 @@ export class AutomationRuntime {
 		let journal: SessionActivityJournal | undefined;
 		let sink: DurableCyrusSessionSink | undefined;
 		let model: AutomationModel | undefined;
+		let sandbox: EngineeringSandbox | undefined;
+		const executeCommand = async (
+			state: AutomationCheckpoint,
+			command: string,
+		) => {
+			if (
+				!authority.engineering ||
+				!this.options.engineering ||
+				!state.engineeringFiles
+			)
+				throw new Error("Engineering executor unavailable");
+			if (!sandbox) {
+				sandbox = this.options.engineering.sandbox();
+				await sandbox.start(state.engineeringFiles, controller.signal);
+			}
+			const result = await sandbox.execute(command, controller.signal);
+			await fresh();
+			state.engineeringFiles = engineeringFilesSchema.parse(
+				await sandbox.snapshot(controller.signal),
+			);
+			return engineeringDiagnostics(result);
+		};
 		const session = admission.sessionDelivery?.session;
 
 		const tools = this.options.tools(
@@ -338,9 +395,10 @@ export class AutomationRuntime {
 						"renew",
 						controller.signal,
 					);
-					const next = renewed.authority;
+					const next = executionAuthority(renewed);
 					this.check(next, receiptOnly);
 					if (
+						renewed.mcp.grantId !== admission.mcp.grantId ||
 						digest(renewed.sessionDelivery ?? null) !==
 							digest(admission.sessionDelivery ?? null) ||
 						checkpointKey(next) !== key ||
@@ -377,13 +435,18 @@ export class AutomationRuntime {
 					scopeKey: key,
 					sequence: 0,
 					status: "running",
+					...(authority.engineering && {
+						engineeringFiles: authority.engineering.files,
+					}),
 					...(admission.sessionDelivery && {
 						sessionDelivery: admission.sessionDelivery,
 					}),
 					messages: [
 						{
 							role: "user",
-							content: `${authority.definition.instruction}\n\n${authority.input}`,
+							content: authority.engineering
+								? `Reviewed technical brief:\n${authority.engineering.technicalBrief}\n\nSynthetic reproduction:\n${authority.engineering.syntheticReproduction}\n\nPermitted publication paths: ${JSON.stringify(authority.engineering.allowedPaths)}. Inspect and edit the private repository files with execute. Publish only through publish_artifact; deployment is denied.`
+								: `${authority.definition.instruction}\n\n${authority.input}`,
 						},
 					],
 				};
@@ -476,12 +539,27 @@ export class AutomationRuntime {
 					// occurrence, including native reconnect/new call IDs.
 					const position =
 						step.type === "tool" &&
-						["reply", "add_comment", "delegate_investigation"].includes(
-							step.call.name,
-						)
+						[
+							"reply",
+							"add_comment",
+							"delegate_investigation",
+							"publish_artifact",
+						].includes(step.call.name)
 							? "write"
 							: state.sequence;
-					state.pending = { key: digest([key, position, step]), step };
+					const engineeringFiles =
+						step.type === "tool" && step.call.name === "publish_artifact"
+							? publicationFiles(authority.engineering!, state.engineeringFiles)
+							: undefined;
+					state.pending = {
+						key: digest(
+							engineeringFiles
+								? [key, position, step, engineeringFiles]
+								: [key, position, step],
+						),
+						step,
+						...(engineeringFiles && { engineeringFiles }),
+					};
 					await this.options.store.save(state);
 				}
 				if (state.pending.step.type === "result") {
@@ -495,6 +573,7 @@ export class AutomationRuntime {
 					tools,
 					controller.signal,
 					fresh,
+					executeCommand,
 					sink,
 					session?.id,
 				);
@@ -508,7 +587,11 @@ export class AutomationRuntime {
 				try {
 					await model?.close?.();
 				} finally {
-					await tools.close();
+					try {
+						await tools.close();
+					} finally {
+						await sandbox?.stop();
+					}
 				}
 			} finally {
 				journal?.close();
@@ -522,6 +605,10 @@ export class AutomationRuntime {
 		tools: ScopedAutomationTools,
 		signal: AbortSignal,
 		fresh: () => Promise<void>,
+		executeCommand: (
+			state: AutomationCheckpoint,
+			command: string,
+		) => Promise<unknown>,
 		sink?: DurableCyrusSessionSink,
 		sessionId?: string,
 	): Promise<void> {
@@ -591,7 +678,14 @@ export class AutomationRuntime {
 			);
 		if (!pending.result) {
 			pending.result = automationToolOutputSchema.parse(
-				await tools.call(pending.step.call, pending.key, signal),
+				pending.step.call.name === "execute"
+					? await executeCommand(state, pending.step.call.arguments.command)
+					: await tools.call(
+							pending.step.call,
+							pending.key,
+							signal,
+							pending.engineeringFiles,
+						),
 			);
 			await this.options.store.save(state);
 		}
