@@ -268,4 +268,10 @@ export interface SlackEventEnvelope {
 	event_time: number;
 	/** Challenge string (only for url_verification) */
 	challenge?: string;
+	/**
+	 * Installations the event is visible to. For a bot-token app this includes
+	 * the bot's own user ID (`is_bot: true`), which lets us recognise a
+	 * `message` event that @mentions the bot.
+	 */
+	authorizations?: Array<{ user_id?: string; is_bot?: boolean }>;
 }
