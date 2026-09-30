@@ -114,6 +114,7 @@ export const mcpCredentialSchema = z
 export const admissionSchema = z
 	.object({
 		authority: authoritySchema,
+		sessionExecutionTiming: z.literal(true).optional(),
 		engineering: engineeringEnvelopeSchema.optional(),
 		mcp: mcpCredentialSchema,
 		sessionDelivery: z

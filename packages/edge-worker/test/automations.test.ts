@@ -836,6 +836,7 @@ it.each([
 		"../src/sinks/session-delivery.js"
 	);
 	const receipts = new Map<number, string>();
+	const measurements: number[] = [];
 	const deliveries: Array<{ sequence: number; attempt: string; kind: string }> =
 		[];
 	let blocked = true,
@@ -861,6 +862,13 @@ it.each([
 						attempt: envelope.attemptId,
 						kind: item.kind,
 					});
+					if (item.kind === "lifecycle" && item.payload.status === "complete") {
+						expect(item.payload.executionDurationComplete).toBe(true);
+						expect(Number.isSafeInteger(item.payload.executionDurationMs)).toBe(
+							true,
+						);
+						measurements.push(item.payload.executionDurationMs!);
+					}
 					const hash = sessionDeliveryDigest(item);
 					if (receipts.has(item.sequence))
 						expect(receipts.get(item.sequence)).toBe(hash);
@@ -870,11 +878,11 @@ it.each([
 						receipts.set(item.sequence, hash);
 					}
 					if (
-						item.kind === "activity" &&
-						item.payload.content.type === "response" &&
+						item.kind === "lifecycle" &&
+						item.payload.status === "complete" &&
 						blocked
 					)
-						throw new Error("Lost response ACK");
+						throw new Error("Lost measured completion ACK");
 					return {
 						contractVersion: 1 as const,
 						sessionId: item.sessionId,
@@ -929,6 +937,7 @@ it.each([
 							expiresAt: new Date(Date.now() + 60000).toISOString(),
 							grantId: "bound-grant",
 						},
+						sessionExecutionTiming: true,
 						sessionDelivery: {
 							contractVersion: 1,
 							path: "/api/agent-sessions/v1/deliver",
@@ -979,6 +988,8 @@ it.each([
 		toolCalls: 1,
 	});
 	expect(receipts.size).toBe(6);
+	expect(measurements.length).toBeGreaterThan(1);
+	expect(new Set(measurements).size).toBe(1);
 	expect(
 		new Set(deliveries.filter((d) => d.sequence === 1).map((d) => d.attempt))
 			.size,
@@ -1365,4 +1376,136 @@ describe("customer-derived opaque reference tools", () => {
 				}),
 			).toThrow();
 	});
+});
+
+it.each([
+	false,
+	true,
+])("persists measured failed work across retry, excluding waits and rejecting negotiation downgrade: %s", async (downgrade) => {
+	const { performance } = await import("node:perf_hooks");
+	let monotonic = 0;
+	const spy = vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+	let now = Date.now();
+	const db = await ledger(() => now);
+	const d = definition();
+	db.upsert(d);
+	const occurrence = db.enqueue(d.id, 1, "timed-retry", "Review");
+	const { sessionDeliveryDigest } = await import(
+		"../src/sinks/session-delivery.js"
+	);
+	const lifecycle: import("../src/sinks/session-delivery.js").SessionLifecycleUpdate[] =
+		[];
+	let modelCalls = 0;
+	let negotiated = true;
+	const options = {
+		workspaceId: () => d.workspaceId,
+		ledger: db,
+		store: new AutomationCheckpointStore(await directory()),
+		readiness: () => ({ ...d.target, reason: null }),
+		sessions: {
+			directory: await directory(),
+			secrets: () => [],
+			transport: {
+				async deliver({
+					item,
+				}: import("../src/sinks/session-delivery.js").SessionDeliveryEnvelope) {
+					monotonic += 60000; // receiver latency must never contribute to executing work
+					if (item.kind === "lifecycle") lifecycle.push(item.payload);
+					return {
+						contractVersion: 1 as const,
+						sessionId: item.sessionId,
+						sequence: item.sequence,
+						digest: sessionDeliveryDigest(item),
+					};
+				},
+			},
+		},
+		tools: () => ({
+			call: async () => ({}),
+			close: async () => {},
+			renew: async (fn: () => Promise<void>) => fn(),
+		}),
+		model: {
+			async next() {
+				monotonic += ++modelCalls * 100;
+				if (modelCalls === 1) throw Error("Controlled interrupted model");
+				return { type: "result" as const, text: "Measured result" };
+			},
+		},
+		gateway: {
+			async call(endpoint: string, body: Record<string, unknown>) {
+				monotonic += 30000; // supervisor/progress/result latency is not executing work
+				if (endpoint === "authorize")
+					return {
+						authority: authority({
+							definition: { ...d, grants: authority().definition.grants },
+							occurrenceId: occurrence.id,
+							attemptId: String(body.attemptId),
+							fence: Number(body.fence),
+							input: occurrence.input,
+						}),
+						mcp: {
+							token: "fixture-credential-not-a-live-secret",
+							audience: "/mcp",
+							expiresAt: new Date(Date.now() + 60000).toISOString(),
+							grantId: "bound-grant",
+						},
+						...(negotiated && { sessionExecutionTiming: true }),
+						sessionDelivery: {
+							contractVersion: 1,
+							path: "/api/agent-sessions/v1/deliver",
+							session: {
+								id: "timed-session",
+								scopeRef: d.scopeRef,
+								role: d.role,
+							},
+						},
+					};
+				if (endpoint === "progress") return {};
+				return {
+					contractVersion: 1,
+					acknowledged: true,
+					occurrenceId: body.occurrenceId,
+					idempotencyKey: body.idempotencyKey,
+				};
+			},
+		},
+	};
+	try {
+		let runtime = new AutomationRuntime(options);
+		await runtime.wake();
+		await runtime.stop();
+		expect(db.status(d.id).occurrences[0]?.status).toBe("queued");
+		expect(lifecycle.at(-1)).toEqual({
+			status: "error",
+			executionDurationMs: 100,
+			executionDurationComplete: true,
+		});
+		now += 6000;
+		monotonic += 86400000;
+		if (downgrade) {
+			negotiated = false;
+			const delivered = lifecycle.length;
+			runtime = new AutomationRuntime(options);
+			await runtime.wake();
+			await runtime.stop();
+			expect(db.status(d.id).occurrences[0]?.status).toBe("queued");
+			expect(modelCalls).toBe(1);
+			expect(lifecycle).toHaveLength(delivered);
+			negotiated = true;
+			now += 11000;
+		}
+		runtime = new AutomationRuntime(options);
+		await runtime.wake();
+		await runtime.stop();
+		expect(db.status(d.id).occurrences[0]?.status).toBe("completed");
+		expect(lifecycle.at(-1)).toEqual({
+			status: "complete",
+			executionDurationMs: 300,
+			executionDurationComplete: true,
+		});
+		expect(modelCalls).toBe(2);
+	} finally {
+		spy.mockRestore();
+	}
 });

@@ -68,6 +68,7 @@ export async function runAutomationDrive({
 	const readSetReferences = new Map();
 	let readSetRotated = false;
 	let sessionRenewals = 0;
+	const measuredCompletions = new Map();
 	let diagnosticRecovered = false;
 	let readSetContentReads = 0;
 	let engineeringCalls = 0;
@@ -232,8 +233,17 @@ export async function runAutomationDrive({
 				instanceId: b.instanceId,
 				revoked: false,
 			});
+			const timing = [
+				"read-set-normal",
+				"read-set-rotate",
+				"lost-ack",
+				"source-free",
+			].includes(d.id);
+			if (timing)
+				assert.equal(request.headers["x-cyrus-session-execution-timing"], "1");
 			return {
 				authority,
+				...(timing && { sessionExecutionTiming: true }),
 				...(engineering && { engineering }),
 				...(request.headers["x-cyrus-session-delivery"] === "1" && {
 					sessionDelivery: {
@@ -284,6 +294,37 @@ export async function runAutomationDrive({
 								: 6,
 			);
 			assert.equal(sessionItems.at(-1).item.payload.status, "complete");
+			const measurement = sessionItems.at(-1).item.payload;
+			if (
+				[
+					"read-set-normal",
+					"read-set-rotate",
+					"lost-ack",
+					"source-free",
+				].includes(d.id)
+			) {
+				assert.equal(measurement.executionDurationComplete, true);
+				assert.ok(
+					Number.isSafeInteger(measurement.executionDurationMs) &&
+						measurement.executionDurationMs >= 0,
+				);
+				if (d.id === "read-set-rotate")
+					assert.ok(
+						measurement.executionDurationMs >= 50000,
+						"both actual slow model calls are measured",
+					);
+				if (measuredCompletions.has(b.occurrenceId))
+					assert.equal(
+						measuredCompletions.get(b.occurrenceId).durationMs,
+						measurement.executionDurationMs,
+						"result-only recovery never adds time",
+					);
+				measuredCompletions.set(b.occurrenceId, {
+					automationId: d.id,
+					durationMs: measurement.executionDurationMs,
+				});
+			} else assert.equal(measurement.executionDurationMs, undefined);
+
 			const previous = results.get(b.occurrenceId);
 			if (previous) assert.equal(previous.key, b.idempotencyKey);
 			else {
@@ -1607,6 +1648,7 @@ export async function runAutomationDrive({
 			target,
 			...(codexImage && { containedImage: codexImage }),
 			activityReceipts: activityReceipts.size,
+			executionTiming: [...measuredCompletions.values()],
 			readSets: {
 				contentReads: readSetContentReads,
 				slowModelTurns: readSetRotated ? 2 : 0,
@@ -1643,6 +1685,7 @@ export async function runAutomationDrive({
 				"admitted Slack/Linear event idle wake, active-turn queue, duplicate/out-of-order delivery and restart retention",
 				"event pause denial and cross-customer context separation",
 				"actual scheduled tick",
+				"negotiated cumulative execution duration excludes receipt recovery; slow native/model calls measured, legacy lifecycle fields unchanged",
 				"non-customer automation",
 				"durable result ACK recovery after pause and restart with model unavailable",
 				"no model/tool/progress reopening",

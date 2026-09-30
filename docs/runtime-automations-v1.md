@@ -584,3 +584,63 @@ explicit live invocation. Runtime owns the atomic command receipt and bounded
 execution cycle. Rollback disables dispatch and preserves new ledger/checkpoint
 fields; older strict readers must not open the upgraded ledger. Neither publishing
 this contract nor building its artifact authorizes a live retry or deployment.
+
+
+### Negotiated execution duration in session lifecycle
+
+Runtime `capabilities.sessionExecutionTiming:true` is available with durable session
+delivery. Authorize requests send `X-Cyrus-Session-Execution-Timing:1` alongside
+`X-Cyrus-Session-Delivery:1`. Hosted opts in with **top-level** admission field
+`sessionExecutionTiming:true`, leaving the immutable `sessionDelivery` descriptor
+unchanged. Admission/renewal cannot change this opt-in within an attempt. No timing
+fields are sent to an old server that omits the acknowledgement. A journal already
+containing timing requires the opt-in on resume; it cannot rewrite immutable items
+for a receiver that loses support. No scheduler or authority scope changes.
+
+Negotiated lifecycle payloads may add a pair (both present or both absent):
+
+```ts
+executionDurationMs?: number;       // integer, 0..Number.MAX_SAFE_INTEGER
+executionDurationComplete?: boolean;
+```
+
+`executionDurationMs` is cumulative **observed execution across attempts of this
+occurrence/session**, including failed and retried work. Model generation and tool
+calls (including their provider latency) are measured; queue, retry/backoff, offline,
+operator wait, initial admission, progress, activity delivery and result receipt
+waits are excluded. Blocking supervisor authorization/native identity delivery
+inside the native model invocation is also excluded. Each child measures its own
+work; parent duration never sums child durations or waiting for child results.
+The existing action/tool/response activity ontology and ephemeral semantics do not
+change. These fields are supervisor measurements, never model arguments/content.
+
+Intervals live in the private SQLite session journal under the existing workspace
+and checkpoint scope. Each interval records attempt, model/tool kind, wall-clock
+observation metadata and a **monotonic-clock** duration. Wall timestamps are not
+subtracted to compute elapsed time. Start, completion and interruption persist
+synchronously; active intervals are durably sampled every five seconds. Fencing
+rejects earlier attempts' timing writers. Controlled interruption closes the interval
+at observed cancellation, rather than counting cleanup or later retry delay.
+
+A process crash cannot yield an exact unobserved tail. Recovery closes an abandoned
+interval at its **last durable sample**, preserves that duration, and permanently
+sets completeness false for this occurrence. It never extends to restart time.
+Pre-upgrade work without measurements is likewise incomplete. Complete=true permits
+an exact 'Worked for...' presentation for a terminal measurement (with ordinary
+display rounding); false must
+be labeled as observed/at least or omitted. An absent pair means unavailable, not
+zero. Hosted must not fill either case using createdAt/updatedAt or receipt age.
+
+An active lifecycle snapshot is emitted at admitted attempt start; completion and
+interruption carry cumulative snapshots. The terminal snapshot is journaled before
+result publication and must be acknowledged first. Lost-ACK replay uses the same
+sequence, payload and digest. Receipt-only recovery creates no execution intervals
+and does not change the total. A result-only resume of old unmeasured work preserves
+its old receipt rather than retroactively adding timing fields. Running snapshots
+are observed values, not an authorization to extrapolate through a disconnected
+runtime. A later status change without a terminal timing measurement must not turn
+an old running snapshot into a final exact duration. Full activities continue through the existing durable normalized sink.
+
+Rollback: disable dispatch and preserve journals/checkpoints before reverting.
+Older strict readers cannot consume journals containing the new lifecycle fields;
+never clear or edit measurement/receipt history to make an old reader accept it.

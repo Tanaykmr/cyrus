@@ -12,6 +12,10 @@ import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import type { CyrusSessionDescriptor } from "./IActivitySink.js";
 import {
+	type ExecutionTimingState,
+	executionTimingStateSchema,
+} from "./SessionExecutionTiming.js";
+import {
 	canonicalSessionJson,
 	cyrusSessionDescriptorSchema,
 	parseSessionDeliveryItem,
@@ -29,6 +33,7 @@ const stateSchema = z
 				z
 					.object({
 						descriptor: cyrusSessionDescriptorSchema,
+						execution: executionTimingStateSchema.optional(),
 						sources: z
 							.array(
 								z
@@ -277,6 +282,22 @@ export class SessionActivityJournal {
 			),
 		);
 	}
+	execution(
+		sessionId: string,
+		update?: (state: ExecutionTimingState | undefined) => ExecutionTimingState,
+	): ExecutionTimingState | undefined {
+		return this.transact((state) => {
+			const session = state.sessions.find((s) => s.descriptor.id === sessionId);
+			if (!session || session.ackSequence < 1)
+				throw new Error("Session has no admitted creation receipt");
+			if (update)
+				session.execution = executionTimingStateSchema.parse(
+					update(session.execution),
+				);
+			return session.execution;
+		});
+	}
+
 	close(): void {
 		this.db.close();
 	}

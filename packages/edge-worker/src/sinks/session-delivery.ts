@@ -14,6 +14,8 @@ export const SESSION_DELIVERY_LIMITS = {
 
 export interface SessionLifecycleUpdate {
 	status: AgentSessionStatus;
+	executionDurationMs?: number;
+	executionDurationComplete?: boolean;
 	harness?: {
 		type: "claude" | "codex" | "gemini" | "cursor" | "opencode";
 		sessionId: string;
@@ -142,6 +144,13 @@ const itemSchema = z
 				payload: z
 					.object({
 						status: z.enum(AgentSessionStatus),
+						executionDurationMs: z
+							.number()
+							.int()
+							.nonnegative()
+							.safe()
+							.optional(),
+						executionDurationComplete: z.boolean().optional(),
 						harness: z
 							.object({
 								type: z.enum([
@@ -156,7 +165,13 @@ const itemSchema = z
 							.strict()
 							.optional(),
 					})
-					.strict(),
+					.strict()
+					.refine(
+						(value) =>
+							(value.executionDurationMs === undefined) ===
+							(value.executionDurationComplete === undefined),
+						"Execution duration requires completeness",
+					),
 			})
 			.strict(),
 	])

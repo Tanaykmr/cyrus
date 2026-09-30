@@ -6,6 +6,7 @@ import type { EngineeringSandbox } from "../customer-runtime/DockerSandbox.js";
 import { DurableCyrusSessionSink } from "../sinks/DurableCyrusSessionSink.js";
 import { SessionActivityJournal } from "../sinks/SessionActivityJournal.js";
 import type { SessionDeliveryTransport } from "../sinks/SessionDeliveryTransport.js";
+import { SessionExecutionTiming } from "../sinks/SessionExecutionTiming.js";
 import {
 	type AutomationCheckpoint,
 	type AutomationCheckpointStore,
@@ -108,6 +109,7 @@ export class AutomationRuntime {
 			},
 			capabilities: {
 				automations: true,
+				sessionExecutionTiming: !!this.options.sessions,
 				sessionActivities: !!this.options.sessions,
 				delegation: !!this.options.sessions,
 				scheduledTicks: true,
@@ -248,6 +250,11 @@ export class AutomationRuntime {
 				safeDiagnostic(parsed.error, "admission"),
 			);
 		const admission = parsed.data;
+		if (
+			admission.sessionExecutionTiming &&
+			(!admission.sessionDelivery || !this.options.sessions)
+		)
+			throw new Error("Execution timing requires session delivery");
 		const next = executionAuthority(admission);
 		const engineering = next.engineering;
 		if (next.definition.role === "engineering" || engineering) {
@@ -372,6 +379,7 @@ export class AutomationRuntime {
 		let credential = admission.mcp;
 		let receiptOnly = !!occurrence.receipt;
 		let journal: SessionActivityJournal | undefined;
+		let timing: SessionExecutionTiming | undefined;
 		let sink: DurableCyrusSessionSink | undefined;
 		let model: AutomationModel | undefined;
 		let sandbox: EngineeringSandbox | undefined;
@@ -458,6 +466,8 @@ export class AutomationRuntime {
 							this.check(next, receiptOnly);
 							if (
 								renewed.mcp.grantId !== admission.mcp.grantId ||
+								renewed.sessionExecutionTiming !==
+									admission.sessionExecutionTiming ||
 								digest(renewed.sessionDelivery ?? null) !==
 									digest(admission.sessionDelivery ?? null) ||
 								checkpointKey(next) !== key ||
@@ -488,6 +498,7 @@ export class AutomationRuntime {
 		try {
 			await fresh();
 			let state = await this.options.store.load(key);
+			const historicalWork = !!state;
 			if (!state) {
 				if (receiptOnly || authority.phase === "reconcile")
 					throw new Error("Missing terminal checkpoint");
@@ -524,6 +535,14 @@ export class AutomationRuntime {
 					authority.definition.workspaceId,
 					key,
 				);
+				if (
+					journal.isCreated(session.id) &&
+					journal.execution(session.id) &&
+					!admission.sessionExecutionTiming
+				)
+					throw new Error(
+						"Persisted execution timing requires negotiated delivery",
+					);
 				sink = new DurableCyrusSessionSink(
 					journal,
 					this.options.sessions.transport,
@@ -541,6 +560,20 @@ export class AutomationRuntime {
 				);
 				await sink.createCyrusSession(session);
 				await sink.flush(controller.signal);
+				if (
+					admission.sessionExecutionTiming &&
+					(journal.execution(session.id) ||
+						(!receiptOnly && state.pending?.step.type !== "result"))
+				)
+					timing = new SessionExecutionTiming(
+						journal,
+						session.id,
+						initial.attemptId,
+						initial.fence,
+						historicalWork,
+						controller.signal,
+						() => controller.abort(),
+					);
 			}
 			if (
 				(receiptOnly || authority.phase === "reconcile") &&
@@ -552,8 +585,11 @@ export class AutomationRuntime {
 				if (session && sink)
 					await sink.updateCyrusSession(
 						session.id,
-						{ status: AgentSessionStatus.Active },
-						"started",
+						{
+							status: AgentSessionStatus.Active,
+							...timing?.snapshot(),
+						},
+						timing ? `started:${initial.attemptId}` : "started",
 					);
 				await fresh();
 				await this.options.gateway.call(
@@ -575,12 +611,13 @@ export class AutomationRuntime {
 						? await this.options.model.open({
 								state,
 								authority: () => authority,
-								authorize: fresh,
+								authorize: () => (timing ? timing.exclude(fresh) : fresh()),
 								save: () => this.options.store.save(state!),
 								signal: controller.signal,
 								nativeIdentity: async (id) => {
-									if (sink && session)
-										await sink.updateCyrusSession(
+									if (!sink || !session) return;
+									const deliver = () =>
+										sink!.updateCyrusSession(
 											session.id,
 											{
 												status: AgentSessionStatus.Active,
@@ -588,11 +625,16 @@ export class AutomationRuntime {
 											},
 											`native:${id}`,
 										);
+									await (timing ? timing.exclude(deliver) : deliver());
 								},
 							})
 						: this.options.model;
 					const step = modelStepSchema.parse(
-						await model.next(state.messages, authority, controller.signal),
+						await (timing
+							? timing.measure("model", () =>
+									model!.next(state!.messages, authority, controller.signal),
+								)
+							: model.next(state.messages, authority, controller.signal)),
 					);
 					await fresh();
 					if (step.type === "tool") authorizeTool(authority, step.call);
@@ -637,10 +679,18 @@ export class AutomationRuntime {
 					executeCommand,
 					sink,
 					session?.id,
+					timing,
 				);
 				if (state.status === "completed") return;
 			}
 		} catch (error) {
+			if (timing && sink && session && !receiptOnly) {
+				await sink.updateCyrusSession(
+					session.id,
+					{ status: AgentSessionStatus.Error, ...timing.snapshot() },
+					`interrupted:${initial.attemptId}`,
+				);
+			}
 			if (authorityFailure)
 				throw new AutomationDiagnosticError(authorityFailure);
 			throw error;
@@ -676,6 +726,7 @@ export class AutomationRuntime {
 		) => Promise<unknown>,
 		sink?: DurableCyrusSessionSink,
 		sessionId?: string,
+		timing?: SessionExecutionTiming,
 	): Promise<void> {
 		const pending = state.pending!;
 		await fresh();
@@ -692,7 +743,10 @@ export class AutomationRuntime {
 				);
 				await sink.updateCyrusSession(
 					sessionId,
-					{ status: AgentSessionStatus.Complete },
+					{
+						status: AgentSessionStatus.Complete,
+						...timing?.snapshot(),
+					},
 					`${pending.key}:complete`,
 				);
 				// An unacknowledged activity must never be stranded by hosted completion.
@@ -742,15 +796,13 @@ export class AutomationRuntime {
 				`${pending.key}:start`,
 			);
 		if (!pending.result) {
+			const call = pending.step.call;
+			const operation = () =>
+				call.name === "execute"
+					? executeCommand(state, call.arguments.command)
+					: tools.call(call, pending.key, signal, pending.engineeringFiles);
 			pending.result = automationToolOutputSchema.parse(
-				pending.step.call.name === "execute"
-					? await executeCommand(state, pending.step.call.arguments.command)
-					: await tools.call(
-							pending.step.call,
-							pending.key,
-							signal,
-							pending.engineeringFiles,
-						),
+				await (timing ? timing.measure("tool", operation) : operation()),
 			);
 			await this.options.store.save(state);
 		}
