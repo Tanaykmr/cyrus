@@ -67,6 +67,7 @@ export async function runAutomationDrive({
 	const readSetCustomerId = randomUUID();
 	const readSetReferences = new Map();
 	let readSetRotated = false;
+	let diagnosticRecovered = false;
 	let readSetContentReads = 0;
 	let engineeringCalls = 0;
 	let lostEngineeringAck = false;
@@ -141,7 +142,7 @@ export async function runAutomationDrive({
 			return denied(reply);
 		owner = { id: b.instanceId, until: Date.now() + 90000 };
 		if (request.params.operation === "authorize") {
-			if (d.id === "diagnostic-denial")
+			if (d.id === "diagnostic-denial" && !diagnosticRecovered)
 				return reply
 					.code(403)
 					.send({ error: "private response must not be persisted" });
@@ -903,7 +904,9 @@ export async function runAutomationDrive({
 			},
 		);
 		assert.equal(discovery.status, 200);
-		assert.equal((await discovery.json()).capabilities.customerReadSet, true);
+		const capabilities = (await discovery.json()).capabilities;
+		assert.equal(capabilities.customerReadSet, true);
+		assert.equal(capabilities.operatorRecovery, true);
 		assert.equal(
 			(await call("wake", { contractVersion: 1, customerId: "evil" }))
 				.statusCode,
@@ -1328,6 +1331,75 @@ export async function runAutomationDrive({
 					.status,
 				401,
 			);
+			const command = {
+				contractVersion: 1,
+				workspaceId: "workspace-a",
+				automationId: d.id,
+				revision: d.revision,
+				occurrenceId: blocked.id,
+				commandId: randomUUID(),
+				expectedFence: blocked.fence,
+			};
+			assert.equal((await call("retry", command, "wrong-key")).statusCode, 401);
+			assert.equal(
+				(await call("retry", { ...command, input: "replacement" })).statusCode,
+				400,
+			);
+			for (const patch of [
+				{ workspaceId: "workspace-b" },
+				{ revision: 2 },
+				{ expectedFence: 2 },
+				{ occurrenceId: "a".repeat(64) },
+			])
+				assert.equal(
+					(await call("retry", { ...command, ...patch })).statusCode,
+					409,
+				);
+			const accepted = await call("retry", command);
+			assert.equal(accepted.statusCode, 202);
+			const replay = await call("retry", command);
+			assert.equal(replay.statusCode, 202);
+			assert.deepEqual(replay.json(), accepted.json());
+			assert.equal(
+				(await call("retry", { ...command, commandId: randomUUID() }))
+					.statusCode,
+				409,
+			);
+			await until(
+				() => ledger.status(d.id).occurrences[0].status === "blocked",
+				25000,
+			);
+			const deniedAgain = ledger.status(d.id).occurrences[0];
+			assert.equal(deniedAgain.attempts, 6);
+			assert.equal(deniedAgain.fence, 6);
+			assert.equal(counts.models, before.models);
+			assert.equal(counts.initialize, before.initialize);
+			assert.deepEqual((await call("retry", command)).json(), accepted.json());
+			assert.equal(ledger.status(d.id).occurrences[0].status, "blocked");
+			diagnosticRecovered = true;
+			const recover = { ...command, commandId: randomUUID(), expectedFence: 6 };
+			assert.equal((await call("retry", recover)).statusCode, 202);
+			await until(
+				() => ledger.status(d.id).occurrences[0].status === "completed",
+				30000,
+			);
+			const completed = ledger.status(d.id).occurrences[0];
+			assert.equal(completed.attempts, 7);
+			assert.equal(completed.fence, 7);
+			for (const key of ["id", "input", "scheduledAt", "order", "revision"])
+				assert.equal(completed[key], blocked[key]);
+			assert.equal(completed.lastFailure, undefined);
+			assert.equal(
+				(
+					await call("retry", {
+						...recover,
+						commandId: randomUUID(),
+						expectedFence: 7,
+					})
+				).statusCode,
+				409,
+			);
+			assert.equal((await call("retry", recover)).statusCode, 202);
 		}
 		for (const id of ["read-set-normal", "read-set-rotate"]) {
 			const d = definition(id, `scope-${id}`);
@@ -1506,6 +1578,7 @@ export async function runAutomationDrive({
 						]
 					: []),
 				"instruction through registered HTTP routes",
+				"authenticated idempotent operator recovery preserves original occurrence, denies widening/active/completed work, exhausts a revoked three-attempt cycle, then completes only after current authority admits a new explicit cycle",
 				"pre-checkpoint authority denial persists safe phase/status after three attempts and is visible only through authenticated runtime status",
 				"customer read-set list/two reads through one current SDK session; forced lease renewal invalidates references and model re-lists before reading",
 				"source-free contained model reply with zero grants, no MCP initialization and durable normalized response/result",

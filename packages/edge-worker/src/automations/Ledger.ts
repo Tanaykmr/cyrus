@@ -22,6 +22,11 @@ import {
 	failureSchema,
 } from "./Diagnostics.js";
 import {
+	type AutomationRecoveryRequest,
+	recoveryReceiptSchema,
+	recoveryRequestSchema,
+} from "./Recovery.js";
+import {
 	AUTOMATION_LIMITS,
 	instructionKey,
 	latestTick,
@@ -38,6 +43,13 @@ const occurrenceSchema = z
 		scheduledAt: z.string(),
 		order: z.number().int(),
 		lastFailure: failureSchema.optional(),
+		retryCycle: z
+			.object({
+				number: z.number().int().positive(),
+				attemptsBase: z.number().int().nonnegative(),
+			})
+			.strict()
+			.optional(),
 		status: z.enum(["queued", "running", "completed", "cancelled", "blocked"]),
 		attempts: z.number().int(),
 		attemptId: z.string(),
@@ -64,6 +76,17 @@ const stateSchema = z
 		version: z.literal(1),
 		definitions: z.record(z.string(), registrationSchema),
 		lastSlots: z.record(z.string(), z.number()),
+		recoveryCommands: z
+			.record(
+				z.string(),
+				z
+					.object({
+						request: recoveryRequestSchema,
+						receipt: recoveryReceiptSchema,
+					})
+					.strict(),
+			)
+			.optional(),
 		occurrences: z.record(z.string(), occurrenceSchema),
 		order: z.number().int(),
 	})
@@ -215,6 +238,74 @@ export class AutomationLedger {
 			return this.add(state, definition, key, input, trigger, now);
 		});
 	}
+	/** Explicit operator recovery; command replay never resets a budget twice. */
+	recover(raw: AutomationRecoveryRequest) {
+		const request = recoveryRequestSchema.parse(raw);
+		if (request.workspaceId !== this.workspaceId)
+			throw new Error("Recovery workspace mismatch");
+		return this.transact((state, now) => {
+			const definition = this.definition(
+				state,
+				request.automationId,
+				request.revision,
+			);
+			const occurrence = state.occurrences[request.occurrenceId];
+			if (
+				!occurrence ||
+				definition.workspaceId !== request.workspaceId ||
+				occurrence.automationId !== request.automationId ||
+				occurrence.revision !== request.revision
+			)
+				throw new Error("Recovery occurrence mismatch");
+			const key = digest(request.commandId);
+			const old = state.recoveryCommands?.[key];
+			if (old) {
+				if (digest(old.request) !== digest(request))
+					throw new Error("Recovery command conflict");
+				return old.receipt;
+			}
+			if (
+				occurrence.status !== "blocked" ||
+				occurrence.fence !== request.expectedFence ||
+				occurrence.leaseUntil > now
+			)
+				throw new Error("Recovery requires the current blocked fence");
+			if (Object.keys(state.recoveryCommands ?? {}).length >= 10_000)
+				throw new Error("Recovery command limit");
+			if (
+				Object.values(state.occurrences).filter(
+					(o) =>
+						o.automationId === request.automationId && o.status === "queued",
+				).length >= AUTOMATION_LIMITS.queuedPerDefinition
+			)
+				throw new Error("Automation queue full");
+			const cycle = (occurrence.retryCycle?.number ?? 0) + 1;
+			const receipt = recoveryReceiptSchema.parse({
+				...request,
+				cycle,
+				maxAttempts: AUTOMATION_LIMITS.maxAttempts,
+				status: "accepted",
+				acceptedAt: new Date(now).toISOString(),
+			});
+			state.recoveryCommands ??= {};
+			state.recoveryCommands[key] = { request, receipt };
+			occurrence.retryCycle = {
+				number: cycle,
+				attemptsBase: occurrence.attempts,
+			};
+			occurrence.status = "queued";
+			occurrence.availableAt = now;
+			occurrence.leaseUntil = 0;
+			return receipt;
+		});
+	}
+	private cycleAttempts(occurrence: AutomationOccurrence): number {
+		// An explicit cycle counts all claims, including a transition to terminal receipt recovery.
+		if (occurrence.retryCycle)
+			return occurrence.attempts - occurrence.retryCycle.attemptsBase;
+		return occurrence.receipt?.attempts ?? occurrence.attempts;
+	}
+
 	private definition(
 		state: State,
 		id: string,
@@ -279,6 +370,7 @@ export class AutomationLedger {
 						o.automationId === definition.id &&
 						o.trigger === "tick" &&
 						!o.receipt &&
+						!o.retryCycle &&
 						o.status === "queued"
 					)
 						o.status = "cancelled";
@@ -300,7 +392,7 @@ export class AutomationLedger {
 			for (const o of Object.values(state.occurrences)) {
 				if (o.status === "running" && o.leaseUntil <= now) {
 					o.status =
-						(o.receipt?.attempts ?? o.attempts) >= AUTOMATION_LIMITS.maxAttempts
+						this.cycleAttempts(o) >= AUTOMATION_LIMITS.maxAttempts
 							? "blocked"
 							: "queued";
 				}
@@ -450,7 +542,7 @@ export class AutomationLedger {
 					),
 					at: new Date(now).toISOString(),
 				};
-				const delay = retryDelayMilliseconds(o.receipt?.attempts ?? o.attempts);
+				const delay = retryDelayMilliseconds(this.cycleAttempts(o));
 				o.status = delay === null ? "blocked" : "queued";
 				o.availableAt = now + (delay ?? 0);
 				o.leaseUntil = 0;

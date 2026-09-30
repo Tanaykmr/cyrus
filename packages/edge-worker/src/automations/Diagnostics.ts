@@ -54,6 +54,8 @@ export class AutomationDiagnosticError extends Error {
 }
 const known: Record<string, AutomationDiagnostic["code"]> = {
 	"Admission identity mismatch": "identity_mismatch",
+	"Admitted checkpoint scope changed": "identity_mismatch",
+	"Receipt checkpoint identity changed": "identity_mismatch",
 	"Invalid scoped credential deadline": "credential_invalid",
 	"Automation authority unavailable": "authority_unavailable",
 	"Automation authority changed": "identity_mismatch",

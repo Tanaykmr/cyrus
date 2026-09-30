@@ -21,6 +21,7 @@ import {
 	type ConfiguredAutomationModel,
 	modelReadiness,
 } from "./Model.js";
+import { recoveryRequestSchema } from "./Recovery.js";
 import { ScopedAutomationMcpClient } from "./ScopedMcpClient.js";
 
 export function registerAutomationRoutes(
@@ -131,6 +132,27 @@ export function registerAutomationRoutes(
 				return reply
 					.code(409)
 					.send({ error: "Automation occurrence rejected" });
+			}
+		},
+	);
+	app.post(
+		"/api/automations/v1/retry",
+		{ bodyLimit: 2048 },
+		async (request, reply) => {
+			if (!authenticated(request.headers.authorization))
+				return reply.code(401).send({ error: "Unauthorized" });
+			const parsed = recoveryRequestSchema.safeParse(request.body);
+			if (!parsed.success)
+				return reply.code(400).send({ error: "Invalid recovery command" });
+			try {
+				const receipt = runtime.recover(parsed.data);
+				void runtime.wake().catch(() => {});
+				return reply
+					.code(202)
+					.header("Cache-Control", "no-store")
+					.send(receipt);
+			} catch {
+				return reply.code(409).send({ error: "Automation recovery rejected" });
 			}
 		},
 	);

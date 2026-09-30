@@ -39,6 +39,7 @@ import {
 import type { AutomationGateway } from "./Gateway.js";
 import type { AutomationLedger, AutomationOccurrence } from "./Ledger.js";
 import type { AutomationModel } from "./Model.js";
+import type { AutomationRecoveryRequest } from "./Recovery.js";
 import type { ScopedAutomationTools } from "./ScopedMcpClient.js";
 import { AUTOMATION_LIMITS } from "./scheduling.js";
 
@@ -114,6 +115,7 @@ export class AutomationRuntime {
 				harnessStreaming: false,
 				scopedMcp: true,
 				customerReadSet: true,
+				operatorRecovery: true,
 				currentAuthorityResume: true,
 				resultReconciliation: true,
 				nativeTools: false,
@@ -195,6 +197,11 @@ export class AutomationRuntime {
 			input,
 			trigger,
 		);
+	}
+	recover(request: AutomationRecoveryRequest) {
+		if (!this.canDrain() || request.workspaceId !== this.options.workspaceId())
+			throw new Error("Recovery runtime unavailable");
+		return this.ledger().recover(request);
 	}
 	status(automationId: string) {
 		return this.ledger().status(automationId);
@@ -347,9 +354,9 @@ export class AutomationRuntime {
 	): Promise<void> {
 		const initial = executionAuthority(admission);
 		const key = checkpointKey(initial);
-		if (initial.engineering) this.ledger().bindCheckpoint(occurrence, key);
 		if (occurrence.receipt && occurrence.receipt.scopeKey !== key)
 			throw new Error("Receipt checkpoint identity changed");
+		this.ledger().bindCheckpoint(occurrence, key);
 		if (this.active.has(key)) throw new Error("Occurrence already active");
 		const controller = new AbortController();
 		this.active.set(key, controller);

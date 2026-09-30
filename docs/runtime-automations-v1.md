@@ -490,3 +490,66 @@ both authorize and initial MCP traces when diagnosing historical runs.
 Do not downgrade a ledger written with these optional fields to an older strict
 reader. Disable dispatch and preserve the ledger/receipts during rollback; never
 strip diagnostic fields by directly mutating a live ledger.
+
+## Explicit operator recovery
+
+`capabilities.operatorRecovery:true` negotiates the additive authenticated
+`POST /api/automations/v1/retry` route on the existing registered runtime. Hosted
+must check capability and current workspace/customer/operator authorization before
+calling it; an old runtime's missing capability/route never falls back to enqueue,
+new instruction, legacy runner or direct database mutation. The command is not a
+model/MCP tool and receives no supervisor credentials through agent context.
+
+Strict request:
+
+```json
+{"contractVersion":1,"workspaceId":"registered-workspace","automationId":"original-automation","revision":2,"occurrenceId":"original-64-character-hex-id","commandId":"operator-command-uuid","expectedFence":3}
+```
+
+`commandId` is a server-managed UUID durably retained by the operator action across
+lost acknowledgements. `expectedFence` comes from the exact blocked occurrence's
+status. No replacement input, role, resource, customer/grant, model, checkpoint,
+operation key or budget is accepted. Registered-runtime Bearer authentication is
+unchanged. Invalid auth401, malformed request400, unavailable/conflicting scope or
+state409. A new command requires the current enabled definition/revision, matching
+paired workspace and exact blocked occurrence/fence, with no active local lease.
+Queued/running/completed/cancelled, paused/deleted/stale-revision and cross-scope
+commands deny. A current Hosted lease owned by another attempt still denies
+execution at admission; the operator must not treat202 as a lease takeover.
+
+Immutable202 receipt echoes all request fields plus
+`{cycle,maxAttempts:3,status:"accepted",acceptedAt:<ISO UTC>}`. In one SQLite
+transaction the runtime records that receipt and moves only blocked work to queued,
+setting a cycle baseline and availableAt. It preserves the original input, trigger,
+scheduledAt, ordering, occurrence ID, checkpoints/native state and pending tool/result
+operation keys. Lifetime attempts and fence never reset; the next ordinary claim
+increments both and creates its attempt ID. New cycle max3 claims includes any
+transition to terminal receipt recovery, using existing5s/10s retry delays. No
+wake, restart, duplicate enqueue or command replay automatically resets a budget.
+Expired owners consume the same cycle budget. Explicitly recovered queued ticks
+are not cancelled by ordinary later-tick coalescing.
+
+An exact accepted-command replay returns its original receipt without modifying
+state or budget, including while running or after completion/exhaustion. A new
+command against those states denies; after another exhaustion only a new explicit
+command with the new observed fence can open a cycle. Reusing a command UUID with
+a different request denies across the workspace. Command records survive process
+restart and serialize across SQLite connections. Storage fails closed at10000
+accepted command records; records are not silently pruned or command IDs reused.
+
+Acceptance queues recovery; it does not authorize an execution. The ordinary
+Hosted admission path rechecks current runtime ownership/lease/revision/policy and
+scope before model/tool/session effects. Every newly admitted occurrence now pins
+its checkpoint scope before effects (previously engineering-only); recovery cannot
+switch an already pinned grant/resource into a new checkpoint. Terminal receipts
+retain their committed scope and recover result ACKs without model/tool reopening,
+including when the configured model is unavailable. No authority is inferred from
+an operator-provided parameter. Existing pre-upgrade ledgers load without mutation
+of occurrence identity; historical unpinned checkpoints still depend on Hosted's
+immutable occurrence grant contract. No automatic migration guesses private scope.
+
+Hosted owns operator-action persistence, customer checks, status/UI projection and
+explicit live invocation. Runtime owns the atomic command receipt and bounded
+execution cycle. Rollback disables dispatch and preserves new ledger/checkpoint
+fields; older strict readers must not open the upgraded ledger. Neither publishing
+this contract nor building its artifact authorizes a live retry or deployment.
