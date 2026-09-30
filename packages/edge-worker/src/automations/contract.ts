@@ -103,8 +103,14 @@ export const mcpCredentialSchema = z
 		audience: z.literal("/mcp"),
 		expiresAt: instant,
 		grantId: id,
+		sessionRenewal: z.literal(true).optional(),
+		sessionId: z.string().uuid().optional(),
 	})
-	.strict();
+	.strict()
+	.refine(
+		(value) => !value.sessionId || value.sessionRenewal === true,
+		"Session continuation requires negotiation",
+	);
 export const admissionSchema = z
 	.object({
 		authority: authoritySchema,

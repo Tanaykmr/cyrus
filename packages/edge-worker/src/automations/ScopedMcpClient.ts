@@ -24,7 +24,7 @@ export interface ScopedAutomationTools {
 		engineeringFiles?: Record<string, string>,
 	): Promise<unknown>;
 	/** Serialize server-side credential rotation with complete MCP operations. */
-	renew(operation: () => Promise<void>): Promise<void>;
+	renew(operation: (sessionId?: string) => Promise<void>): Promise<void>;
 	/** Current authority check on the admitted SDK session; never extends its lease. */
 	revalidate?(): Promise<void>;
 	close(): Promise<void>;
@@ -43,8 +43,44 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 		this.queue = next.catch(() => {});
 		return next;
 	}
-	renew(operation: () => Promise<void>): Promise<void> {
-		return this.exclusive(operation);
+	renew(operation: (sessionId?: string) => Promise<void>): Promise<void> {
+		return this.exclusive(async () => {
+			const admitted = this.connectedCredential;
+			const sessionId = admitted?.sessionRenewal
+				? this.transport?.sessionId
+				: undefined;
+			const authorityIdentity = () => {
+				const { leaseUntil: _lease, ...identity } = this.authority();
+				return JSON.stringify(identity);
+			};
+			const identity = authorityIdentity();
+			try {
+				if (sessionId && Date.parse(admitted!.expiresAt) <= Date.now())
+					throw new Error("Expired MCP session cannot renew");
+				await operation(sessionId);
+				this.signal.throwIfAborted();
+				const next = this.credential();
+				if (sessionId) {
+					if (
+						!next.sessionRenewal ||
+						next.sessionId !== sessionId ||
+						next.grantId !== admitted!.grantId ||
+						next.audience !== "/mcp" ||
+						Date.parse(next.expiresAt) <= Date.now() ||
+						identity !== authorityIdentity()
+					)
+						throw new Error("MCP session continuation not authorized");
+					// The SDK operation queue is idle. Preserve this exact transport and
+					// its references only after the server atomically admits continuation.
+					Object.assign(admitted!, next);
+				} else if (next.sessionId) {
+					throw new Error("Unrequested MCP session continuation");
+				}
+			} catch (error) {
+				await this.disconnect();
+				throw error;
+			}
+		});
 	}
 	private readonly url: URL;
 	constructor(
@@ -87,14 +123,15 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 			fetch: async (url, init) => {
 				if (String(url) !== this.url.href)
 					throw new Error("MCP transport origin changed");
+				const admitted = { ...credential };
 				if (
-					credential.audience !== "/mcp" ||
-					Date.parse(credential.expiresAt) <= Date.now()
+					admitted.audience !== "/mcp" ||
+					Date.parse(admitted.expiresAt) <= Date.now()
 				)
 					throw new Error("Scoped MCP credential expired");
 				this.signal.throwIfAborted();
 				const headers = new Headers(init?.headers);
-				headers.set("Authorization", `Bearer ${credential.token}`);
+				headers.set("Authorization", `Bearer ${admitted.token}`);
 				const response = await fetch(this.url, {
 					...init,
 					redirect: "error",
@@ -321,6 +358,7 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 		this.references.clear();
 		const transport = this.transport;
 		this.transport = undefined;
+		this.connectedCredential = undefined;
 		const client = this.client;
 		this.client = undefined;
 		// Local close only. Completion/revocation may already prohibit protocol DELETE.

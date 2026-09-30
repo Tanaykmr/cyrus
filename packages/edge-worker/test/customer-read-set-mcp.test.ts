@@ -4,10 +4,16 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import Fastify from "fastify";
 import { expect, it, vi } from "vitest";
 import { z } from "zod";
-import type { AutomationAuthority } from "../src/automations/contract.js";
+import type {
+	AutomationAuthority,
+	McpCredential,
+} from "../src/automations/contract.js";
 import { ScopedAutomationMcpClient } from "../src/automations/ScopedMcpClient.js";
 
-it("lists and reads session references through SDK transport; rejects cross-session, rotated, revoked and cross-customer access", async () => {
+it.each([
+	false,
+	true,
+])("SDK read-set isolation and repeated slow-turn renewal (continuation=%s)", async (continuation) => {
 	const customerId = randomUUID();
 	const resource = { provider: "linear" as const, customerId };
 	const grant = {
@@ -40,11 +46,12 @@ it("lists and reads session references through SDK transport; rejects cross-sess
 		phase: "execute",
 		input: "Review",
 	};
-	let credential = {
+	let credential: McpCredential = {
 		grantId: grant.id,
 		audience: "/mcp" as const,
 		expiresAt: new Date(Date.now() + 60000).toISOString(),
 		token: "fixture-first-token",
+		...(continuation ? { sessionRenewal: true as const } : {}),
 	};
 	let revoked = false,
 		foreignResult = false,
@@ -179,6 +186,84 @@ it("lists and reads session references through SDK transport; rejects cross-sess
 		).resolves.toMatchObject({
 			items: [{ text: expect.stringContaining("Call list_issues") }],
 		});
+		if (continuation) {
+			// Model thinking spans multiple 60s leases. Advance wall time only;
+			// HTTP initialization/list/calls still use the real SDK/server transport.
+			const now = Date.now();
+			const clock = vi.spyOn(Date, "now");
+			try {
+				for (let turn = 1; turn <= 4; turn++) {
+					for (let rotation = 0; rotation < 2; rotation++) {
+						clock.mockReturnValue(
+							now + ((turn - 1) * 2 + rotation + 1) * 45000,
+						);
+						await client.renew(async (sessionId) => {
+							expect(sessionId).toBe([...sessions.keys()][0]);
+							const admitted = sessions.get(sessionId!)!;
+							expect(admitted.token).toBe(credential.token);
+							credential = {
+								...credential,
+								token: `rotated-${turn}-${rotation}`,
+								expiresAt: new Date(Date.now() + 60000).toISOString(),
+								sessionId,
+							};
+							admitted.token = credential.token;
+						});
+						await client.revalidate();
+					}
+					await expect(
+						call("get_issue", { reference: first[0]!.reference }),
+					).resolves.toEqual({
+						items: [{ text: "Private content FIX-1" }],
+						nextCursor: null,
+					});
+				}
+				expect(sessions.size).toBe(1);
+			} finally {
+				clock.mockRestore();
+			}
+			for (const fault of ["foreign-session", "changed-attempt", "expired"]) {
+				const previous = await list();
+				const attemptId = authority.attemptId;
+				await expect(
+					client.renew(async (sessionId) => {
+						credential = {
+							...credential,
+							token: `fault-${fault}`,
+							sessionId: fault === "foreign-session" ? randomUUID() : sessionId,
+							expiresAt: new Date(
+								Date.now() + (fault === "expired" ? -1 : 60000),
+							).toISOString(),
+						};
+						if (fault === "changed-attempt")
+							authority.attemptId = "replacement-attempt";
+					}),
+				).rejects.toThrow("continuation not authorized");
+				authority.attemptId = attemptId;
+				credential = {
+					...credential,
+					sessionId: undefined,
+					expiresAt: new Date(Date.now() + 60000).toISOString(),
+				};
+				await expect(
+					call("get_issue", { reference: previous[0]!.reference }),
+				).resolves.toMatchObject({
+					items: [{ text: expect.stringContaining("Call list_issues") }],
+				});
+			}
+			credential = {
+				...credential,
+				expiresAt: new Date(Date.now() - 1).toISOString(),
+			};
+			// An expired admitted session cannot be renewed even by a permissive callback.
+			await client.close();
+			await expect(call("list_issues")).rejects.toThrow("interrupted");
+			credential = {
+				...credential,
+				expiresAt: new Date(Date.now() + 60000).toISOString(),
+			};
+			providerReads = 2;
+		}
 		await client.close();
 		expect(providerReads).toBe(2);
 		await list();
@@ -189,9 +274,19 @@ it("lists and reads session references through SDK transport; rejects cross-sess
 		});
 		expect(providerReads).toBe(2);
 		const beforeRotation = await list();
-		await client.renew(async () => {
-			credential = { ...credential, token: "fixture-rotated-token" };
+		const legacyRotation = client.renew(async () => {
+			credential = {
+				grantId: credential.grantId,
+				audience: "/mcp",
+				expiresAt: credential.expiresAt,
+				token: "fixture-rotated-token",
+			};
 		});
+		if (continuation)
+			await expect(legacyRotation).rejects.toThrow(
+				"continuation not authorized",
+			);
+		else await legacyRotation;
 		await expect(
 			call("get_issue", { reference: beforeRotation[0]!.reference }),
 		).resolves.toMatchObject({
@@ -256,6 +351,12 @@ it("negotiates customer read sets only on the authenticated authorize transport"
 		).toBe("1");
 		expect(
 			new Headers(calls[1]!.headers).has("X-Cyrus-Customer-Read-Set"),
+		).toBe(false);
+		expect(
+			new Headers(calls[0]!.headers).get("X-Cyrus-Mcp-Session-Renewal"),
+		).toBe("1");
+		expect(
+			new Headers(calls[1]!.headers).has("X-Cyrus-Mcp-Session-Renewal"),
 		).toBe(false);
 		expect(JSON.parse(calls[0]!.body as string)).toEqual({
 			phase: "admit",

@@ -115,6 +115,7 @@ export class AutomationRuntime {
 				harnessStreaming: false,
 				scopedMcp: true,
 				customerReadSet: true,
+				mcpSessionRenewal: true,
 				operatorRecovery: true,
 				currentAuthorityResume: true,
 				resultReconciliation: true,
@@ -211,6 +212,7 @@ export class AutomationRuntime {
 		occurrence: AutomationOccurrence,
 		phase: "admit" | "renew",
 		signal: AbortSignal,
+		mcpSessionId?: string,
 	) {
 		this.ledger().renew(occurrence);
 		const parsed = admissionSchema.safeParse(
@@ -231,10 +233,16 @@ export class AutomationRuntime {
 						input: occurrence.input,
 					},
 					phase,
+					...(mcpSessionId && { mcpSessionId }),
 				},
 				signal,
 			),
 		);
+		if (parsed.success && parsed.data.mcp.sessionId !== mcpSessionId)
+			throw new AutomationDiagnosticError({
+				phase: "admission",
+				code: "response_invalid",
+			});
 		if (!parsed.success)
 			throw new AutomationDiagnosticError(
 				safeDiagnostic(parsed.error, "admission"),
@@ -436,7 +444,7 @@ export class AutomationRuntime {
 						this.ledger().renew(occurrence);
 					}
 				: () =>
-						tools.renew(async () => {
+						tools.renew(async (mcpSessionId) => {
 							controller.signal.throwIfAborted();
 							this.check(authority, receiptOnly);
 							const renewed = await this.admit(
@@ -444,6 +452,7 @@ export class AutomationRuntime {
 								occurrence,
 								"renew",
 								controller.signal,
+								mcpSessionId,
 							);
 							const next = executionAuthority(renewed);
 							this.check(next, receiptOnly);

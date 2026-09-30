@@ -67,6 +67,7 @@ export async function runAutomationDrive({
 	const readSetCustomerId = randomUUID();
 	const readSetReferences = new Map();
 	let readSetRotated = false;
+	let sessionRenewals = 0;
 	let diagnosticRecovered = false;
 	let readSetContentReads = 0;
 	let engineeringCalls = 0;
@@ -205,6 +206,24 @@ export async function runAutomationDrive({
 			const grantId = resourceGrant.id,
 				token = `fixture-${randomUUID()}-${randomUUID()}`,
 				until = Date.now() + (d.id === "read-set-rotate" ? 20000 : 60000);
+			const retainSession =
+				d.id === "read-set-rotate" &&
+				request.headers["x-cyrus-mcp-session-renewal"] === "1";
+			if (b.mcpSessionId) {
+				const session = sessions.get(b.mcpSessionId);
+				assert.ok(
+					retainSession &&
+						b.phase === "renew" &&
+						previous &&
+						previous.until > Date.now(),
+				);
+				assert.equal(previous.authority.attemptId, b.attemptId);
+				assert.equal(previous.authority.fence, b.fence);
+				assert.equal(session?.grantId, grantId);
+				assert.equal(grants.get(session.token), previous);
+				session.token = token;
+				sessionRenewals++;
+			}
 			if (previous) previous.revoked = true;
 			grants.set(token, {
 				authority: { ...authority, ...(engineering && { engineering }) },
@@ -232,6 +251,8 @@ export async function runAutomationDrive({
 					audience: "/mcp",
 					expiresAt: new Date(until).toISOString(),
 					grantId,
+					...(retainSession && { sessionRenewal: true }),
+					...(b.mcpSessionId && { sessionId: b.mcpSessionId }),
 				},
 			};
 		}
@@ -249,13 +270,9 @@ export async function runAutomationDrive({
 			assert.equal(
 				sessionItems.length,
 				d.id.startsWith("read-set-")
-					? d.id === "read-set-rotate"
-						? codexImage
-							? 15
-							: 14
-						: codexImage
-							? 11
-							: 10
+					? codexImage
+						? 11
+						: 10
 					: engineeringAssignments.has(d.id)
 						? 11
 						: d.id === "source-free"
@@ -403,9 +420,9 @@ export async function runAutomationDrive({
 			readSet &&
 			(outputs === 0 ||
 				JSON.stringify(lastOutput).includes("Call list_issues"));
-		if (readSet === "read-set-rotate" && outputs === 1 && !readSetRotated) {
+		if (readSet === "read-set-rotate" && outputs > 0 && outputs < 3) {
 			readSetRotated = true;
-			await new Promise((resolve) => setTimeout(resolve, 6500));
+			await new Promise((resolve) => setTimeout(resolve, 25000));
 		}
 
 		if (engineering && outputs === 1)
@@ -554,7 +571,10 @@ export async function runAutomationDrive({
 			return denied(reply, 401);
 		const sessionId = request.headers["mcp-session-id"];
 		let session = sessionId && sessions.get(sessionId);
-		if (sessionId && (!session || session.grantId !== grant.grantId))
+		if (
+			sessionId &&
+			(!session || session.grantId !== grant.grantId || session.token !== token)
+		)
 			return denied(reply, 404);
 		if (!session) {
 			if (request.body?.method !== "initialize") return denied(reply);
@@ -568,7 +588,7 @@ export async function runAutomationDrive({
 				enableJsonResponse: true,
 				onsessioninitialized: (id) => sessions.set(id, session),
 			});
-			session = { server, transport, grantId: grant.grantId };
+			session = { server, transport, grantId: grant.grantId, token };
 			const issuedReferences = new Map();
 			for (const name of permittedToolNames(grant.authority).filter(
 				(name) => name !== "execute",
@@ -1002,6 +1022,23 @@ export async function runAutomationDrive({
 		assert.equal(counts.models, modelBefore);
 		assert.equal(counts.progress, progressBefore);
 		assert.equal(counts.tools, toolsBefore);
+		// The scheduled tick is already verified. Keep later slow-turn fixtures
+		// independent of wall-clock tick count rather than racing aggregate totals.
+		const pausedTick = {
+			...tick,
+			revision: tick.revision + 1,
+			state: "paused",
+		};
+		definitions.set(tick.id, pausedTick);
+		assert.equal(
+			(
+				await call("definitions", {
+					contractVersion: 1,
+					definition: pausedTick,
+				})
+			).statusCode,
+			200,
+		);
 		modelEnabled = true;
 		// Real connection/session tests, using an explicitly admitted fixture authority.
 		const d = definition("session-probe", "probe");
@@ -1412,13 +1449,28 @@ export async function runAutomationDrive({
 				eventId: `event-${id}`,
 				input: "Review currently accessible issues",
 			});
-			await until(() => counts.resultCommits === before + 1, 30000);
 			await until(
-				() => ledger.status(id).occurrences[0].status === "completed",
+				() => ledger.status(id).occurrences[0]?.status === "completed",
+				90000,
 			);
+			assert.ok(results.has(ledger.status(id).occurrences[0].id));
+			assert.equal(counts.resultCommits, before + 1);
 		}
+		assert.equal(
+			[...sessions.values()].filter(
+				(s) =>
+					s.grantId ===
+					`grant-${ledger.status("read-set-rotate").occurrences[0].id}`,
+			).length,
+			1,
+			"slow turns retain the same SDK session",
+		);
 		assert.equal(readSetContentReads, 4);
 		assert.equal(readSetRotated, true);
+		assert.ok(
+			sessionRenewals >= 4,
+			"multiple renewals during EACH slow model turn",
+		);
 		{
 			const d = definition("source-free", "customer-source-free");
 			d.instruction =
@@ -1496,10 +1548,12 @@ export async function runAutomationDrive({
 				eventId: "reviewed-assignment",
 				input: "Reviewed engineering work",
 			});
-			await until(() => counts.resultCommits === before + 1, 30000);
 			await until(
-				() => ledger.status(id).occurrences[0].status === "completed",
+				() => ledger.status(id).occurrences[0]?.status === "completed",
+				90000,
 			);
+			assert.ok(results.has(ledger.status(id).occurrences[0].id));
+			assert.equal(counts.resultCommits, before + 1);
 			assert.equal(engineeringPublications.size, 1);
 			assert.ok(engineeringCalls >= 2);
 			assert.equal(lostEngineeringAck, true);
@@ -1555,7 +1609,8 @@ export async function runAutomationDrive({
 			activityReceipts: activityReceipts.size,
 			readSets: {
 				contentReads: readSetContentReads,
-				rotationRelist: readSetRotated,
+				slowModelTurns: readSetRotated ? 2 : 0,
+				sessionRenewals,
 			},
 			engineering: {
 				assignments: engineeringAssignments.size,
@@ -1580,7 +1635,7 @@ export async function runAutomationDrive({
 				"instruction through registered HTTP routes",
 				"authenticated idempotent operator recovery preserves original occurrence, denies widening/active/completed work, exhausts a revoked three-attempt cycle, then completes only after current authority admits a new explicit cycle",
 				"pre-checkpoint authority denial persists safe phase/status after three attempts and is visible only through authenticated runtime status",
-				"customer read-set list/two reads through one current SDK session; forced lease renewal invalidates references and model re-lists before reading",
+				"customer read-set list/two reads through one current SDK session; two 25-second model turns each outlast the 20-second lease while negotiated renewal preserves exact references",
 				"source-free contained model reply with zero grants, no MCP initialization and durable normalized response/result",
 				"model-facing direct/ticket delegation through SDK MCP, stable payload identity across lost ACK/new attempt/repeated native calls, exactly one child per request",
 				"direct and assigned-ticket child descriptors, parent linkage and separate durable activity journals",

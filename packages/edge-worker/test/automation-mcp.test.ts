@@ -18,7 +18,10 @@ function gate() {
 	return { promise, release };
 }
 
-it("pins SDK sessions during initialize and slow writes, rotates only between operations, reconciles uncertain writes with the same key", async () => {
+it.each([
+	false,
+	true,
+])("pins initialize/slow writes and reconciles exact keys (session renewal=%s)", async (continuation) => {
 	const resource = {
 		provider: "linear" as const,
 		teamId: "team",
@@ -59,6 +62,7 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 		audience: "/mcp",
 		expiresAt: new Date(Date.now() + 60000).toISOString(),
 		token: "first-fixture-token-not-a-real-secret",
+		...(continuation && { sessionRenewal: true as const }),
 	};
 	let currentToken = credential.token;
 	let revoked = false,
@@ -193,9 +197,13 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 		controller.signal,
 	);
 	const rotate = async (token: string) =>
-		client.renew(async () => {
+		client.renew(async (sessionId) => {
+			if (sessionId) {
+				expect(sessions.get(sessionId)?.token).toBe(currentToken);
+				sessions.get(sessionId)!.token = token;
+			}
 			currentToken = token;
-			credential = { ...credential, token };
+			credential = { ...credential, token, sessionId };
 		});
 	try {
 		const read = client.call(
@@ -242,9 +250,11 @@ it("pins SDK sessions during initialize and slow writes, rotates only between op
 				controller.signal,
 			),
 		).resolves.toEqual({ items: [{ text: "bound result" }], nextCursor: null });
-		expect(requests.filter((r) => r.method === "initialize")).toHaveLength(3);
+		expect(requests.filter((r) => r.method === "initialize")).toHaveLength(
+			continuation ? 1 : 3,
+		);
 		for (const request of requests)
-			if (request.session)
+			if (request.session && !continuation)
 				expect(sessions.get(request.session)?.token).toBe(request.token);
 		loseAck = true;
 		const uncertain = {

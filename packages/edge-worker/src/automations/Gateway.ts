@@ -48,7 +48,10 @@ export class AutomationHttpGateway implements AutomationGateway {
 				headers: {
 					"Content-Type": "application/json",
 					...(endpoint === "authorize"
-						? { "X-Cyrus-Customer-Read-Set": "1" }
+						? {
+								"X-Cyrus-Customer-Read-Set": "1",
+								"X-Cyrus-Mcp-Session-Renewal": "1",
+							}
 						: {}),
 					Authorization: `Bearer ${apiKey}`,
 					"X-Cyrus-Team-Id": workspaceId,

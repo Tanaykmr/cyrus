@@ -187,8 +187,8 @@ is protocol state, never authorization. No OAuth/browser login, global MCP confi
 provider token, native fallback or model-selected endpoint. Renewal rotates the token
 hash/expiry under a stable grantId. Runtime serializes the entire initialize/list/call
 operation with supervisor renewal, including the server-side rotation request. Each
-transport pins its admitted credential; after rotation the next operation initializes
-a new session. No token/session ID is checkpointed. The lease abort deadline remains
+HTTP request pins its admitted credential. Without negotiated session renewal,
+rotation initializes a new session; negotiated renewal below retains the exact session. No token/session ID is checkpointed. The lease abort deadline remains
 active while renewal waits (each MCP request is bounded to 20s); expired/revoked
 credentials are never kept valid for a pending call. Server authorization on every
 request remains mandatory. Interrupted writes keep the same pending operation key
@@ -213,7 +213,8 @@ The standard result envelope retains the authenticated customer binding; its
 this shape and remembers references only within the initialized MCP connection.
 Hosted checks current grant and provider association before returning content.
 
-References expire on credential rotation/reconnect. While the existing lease and
+References expire on reconnect and on credential rotation without the negotiated
+continuation below. While the existing lease and
 token have more than 15 seconds remaining, runtime's current-authority checks
 (including the 5-second poll and model/activity boundaries) use authenticated SDK
 `tools/list`. The published Hosted handler revalidates current run, registration
@@ -221,6 +222,36 @@ owner, grant, policy, mapping/account and session on this request. This is an
 authorization probe, not a lease extension. At the renewal threshold the existing
 authorize flow rotates the credential; the exclusive MCP queue serializes this
 with in-flight calls. The original absolute expiry timer remains active.
+
+### Negotiated MCP session renewal
+
+`capabilities.mcpSessionRenewal:true` and authorize header
+`X-Cyrus-Mcp-Session-Renewal:1` advertise support. Hosted opts in with optional
+`mcp.sessionRenewal:true` on initial admission. Without that acknowledgement runtime
+sends no new body fields and retains the legacy reconnect behavior. This capability
+alone is not proof that the connected Hosted implementation supports continuation.
+
+On phase `renew`, runtime may send optional `mcpSessionId:UUID`, taken only from its
+currently admitted real SDK transport. Hosted must atomically validate the same
+workspace/runtime owner, run/attempt/fence, revision, grant and resource binding,
+plus an open unexpired session bound to the previous credential, before rotating
+that credential and retaining that exact session. Foreign, closed or expired sessions
+and changed authority reject; new attempts cannot inherit sessions. Other sessions
+must not gain authority from this operation. All existing renewal budgets apply.
+
+Hosted acknowledges a requested continuation with `mcp.sessionRenewal:true` and
+`mcp.sessionId` equal to the requested ID. No session ID is returned without a
+continuation request. Missing/mismatched/unsolicited acknowledgement fails closed.
+The supervisor serializes renewal with complete initialize/list/call operations,
+then changes the admitted transport credential at that idle boundary. Each HTTP
+request snapshots it before sending. References remain within the *same* MCP session;
+none are mapped to provider IDs, transferred between sessions or restored from disk.
+No session ID or credential enters model arguments or checkpoints. The original
+lease timer stays active while waiting; revocation and fresh association checks
+still apply to every request. Slow model turns may span multiple authorized renewals.
+Pending write arguments and operation keys remain unchanged, including lost-ACK
+reconciliation. Real disconnect, process restart or replacement attempt clears the
+local reference set and requires a fresh listing.
 
 After reconnect an old/unissued pure-read reference yields a bounded instruction
 to call `list_issues` again, without accessing a provider. Session references are
