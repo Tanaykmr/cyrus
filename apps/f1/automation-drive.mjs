@@ -141,6 +141,10 @@ export async function runAutomationDrive({
 			return denied(reply);
 		owner = { id: b.instanceId, until: Date.now() + 90000 };
 		if (request.params.operation === "authorize") {
+			if (d.id === "diagnostic-denial")
+				return reply
+					.code(403)
+					.send({ error: "private response must not be persisted" });
 			if (
 				digest(b.definition) !== digest(d) ||
 				b.occurrenceId !== b.occurrence.id
@@ -1282,6 +1286,49 @@ export async function runAutomationDrive({
 		);
 		assert.equal(lostDelegationAck, true);
 
+		{
+			const d = definition("diagnostic-denial", "diagnostic-scope");
+			const before = { models: counts.models, initialize: counts.initialize };
+			await call("definitions", { contractVersion: 1, definition: d });
+			await call("occurrences", {
+				...event,
+				automationId: d.id,
+				eventId: "diagnostic-event",
+				input: "private diagnostic input",
+			});
+			await until(
+				() => ledger.status(d.id).occurrences[0]?.status === "blocked",
+				25000,
+			);
+			const response = await realFetch(
+				`${runtimeOrigin}/api/automations/v1/status/${d.id}`,
+				{ headers: { authorization: `Bearer ${supervisorKey}` } },
+			);
+			assert.equal(response.status, 200);
+			const blocked = (await response.json()).occurrences[0];
+			assert.equal(blocked.attempts, 3);
+			assert.deepEqual(
+				{ ...blocked.lastFailure, at: undefined },
+				{
+					phase: "authorize",
+					code: "http_denied",
+					httpStatus: 403,
+					at: undefined,
+				},
+			);
+			assert.ok(Number.isFinite(Date.parse(blocked.lastFailure.at)));
+			assert.equal(
+				JSON.stringify(blocked.lastFailure).includes("private"),
+				false,
+			);
+			assert.equal(counts.models, before.models);
+			assert.equal(counts.initialize, before.initialize);
+			assert.equal(
+				(await realFetch(`${runtimeOrigin}/api/automations/v1/status/${d.id}`))
+					.status,
+				401,
+			);
+		}
 		for (const id of ["read-set-normal", "read-set-rotate"]) {
 			const d = definition(id, `scope-${id}`);
 			d.instruction = `Review both issues in ${id}`;
@@ -1459,6 +1506,7 @@ export async function runAutomationDrive({
 						]
 					: []),
 				"instruction through registered HTTP routes",
+				"pre-checkpoint authority denial persists safe phase/status after three attempts and is visible only through authenticated runtime status",
 				"customer read-set list/two reads through one current SDK session; forced lease renewal invalidates references and model re-lists before reading",
 				"source-free contained model reply with zero grants, no MCP initialization and durable normalized response/result",
 				"model-facing direct/ticket delegation through SDK MCP, stable payload identity across lost ACK/new attempt/repeated native calls, exactly one child per request",

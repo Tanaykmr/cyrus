@@ -1,4 +1,5 @@
 import { readBoundedJson } from "../customer-runtime/Gateway.js";
+import { AutomationDiagnosticError } from "./Diagnostics.js";
 
 export type AutomationEndpoint = "authorize" | "progress" | "result";
 export interface AutomationGateway {
@@ -62,13 +63,24 @@ export class AutomationHttpGateway implements AutomationGateway {
 				},
 				body: JSON.stringify({ ...body, contractVersion: 1 }),
 			},
-		);
+		).catch(() => {
+			throw new AutomationDiagnosticError({
+				phase: endpoint,
+				code: "transport_failed",
+			});
+		});
 		if (!response.ok) {
 			await response.body?.cancel();
-			throw new Error(
+			throw new AutomationDiagnosticError(
+				{ phase: endpoint, code: "http_denied", httpStatus: response.status },
 				`Automation authority denied request (${response.status})`,
 			);
 		}
-		return readBoundedJson(response, 2_000_000);
+		return readBoundedJson(response, 2_000_000).catch(() => {
+			throw new AutomationDiagnosticError({
+				phase: endpoint,
+				code: "response_invalid",
+			});
+		});
 	}
 }

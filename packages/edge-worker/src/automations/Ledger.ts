@@ -17,6 +17,11 @@ import {
 	registrationSchema,
 } from "./contract.js";
 import {
+	type AutomationDiagnostic,
+	diagnosticSchema,
+	failureSchema,
+} from "./Diagnostics.js";
+import {
 	AUTOMATION_LIMITS,
 	instructionKey,
 	latestTick,
@@ -32,6 +37,7 @@ const occurrenceSchema = z
 		trigger: z.enum(["instruction", "event", "tick"]),
 		scheduledAt: z.string(),
 		order: z.number().int(),
+		lastFailure: failureSchema.optional(),
 		status: z.enum(["queued", "running", "completed", "cancelled", "blocked"]),
 		attempts: z.number().int(),
 		attemptId: z.string(),
@@ -419,7 +425,11 @@ export class AutomationLedger {
 			o.leaseUntil = now + AUTOMATION_LIMITS.leaseSeconds * 1000;
 		});
 	}
-	finish(claim: AutomationOccurrence, success: boolean): void {
+	finish(
+		claim: AutomationOccurrence,
+		success: boolean,
+		failure?: AutomationDiagnostic,
+	): void {
 		this.transact((state, now) => {
 			const o = state.occurrences[claim.id];
 			if (
@@ -430,8 +440,16 @@ export class AutomationLedger {
 				o.leaseUntil <= now
 			)
 				return;
-			if (success) o.status = "completed";
-			else {
+			if (success) {
+				o.status = "completed";
+				delete o.lastFailure;
+			} else {
+				o.lastFailure = {
+					...diagnosticSchema.parse(
+						failure ?? { phase: "execute", code: "execution_interrupted" },
+					),
+					at: new Date(now).toISOString(),
+				};
 				const delay = retryDelayMilliseconds(o.receipt?.attempts ?? o.attempts);
 				o.status = delay === null ? "blocked" : "queued";
 				o.availableAt = now + (delay ?? 0);

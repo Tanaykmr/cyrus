@@ -27,6 +27,11 @@ import {
 	registrationSchema,
 } from "./contract.js";
 import {
+	type AutomationDiagnostic,
+	AutomationDiagnosticError,
+	safeDiagnostic,
+} from "./Diagnostics.js";
+import {
 	engineeringDiagnostics,
 	engineeringFilesSchema,
 	publicationFiles,
@@ -152,6 +157,7 @@ export class AutomationRuntime {
 		);
 		await Promise.allSettled(
 			claims.map(async ({ definition, occurrence }) => {
+				let phase: "admission" | "execute" = "admission";
 				try {
 					const authority = await this.admit(
 						definition,
@@ -159,10 +165,11 @@ export class AutomationRuntime {
 						"admit",
 						AbortSignal.timeout(20_000),
 					);
+					phase = "execute";
 					await this.execute(authority, occurrence, definition);
 					this.ledger().finish(occurrence, true);
-				} catch {
-					this.ledger().finish(occurrence, false);
+				} catch (error) {
+					this.ledger().finish(occurrence, false, safeDiagnostic(error, phase));
 				}
 			}),
 		);
@@ -199,7 +206,7 @@ export class AutomationRuntime {
 		signal: AbortSignal,
 	) {
 		this.ledger().renew(occurrence);
-		const admission = admissionSchema.parse(
+		const parsed = admissionSchema.safeParse(
 			await this.options.gateway.call(
 				"authorize",
 				{
@@ -221,6 +228,11 @@ export class AutomationRuntime {
 				signal,
 			),
 		);
+		if (!parsed.success)
+			throw new AutomationDiagnosticError(
+				safeDiagnostic(parsed.error, "admission"),
+			);
+		const admission = parsed.data;
 		const next = executionAuthority(admission);
 		const engineering = next.engineering;
 		if (next.definition.role === "engineering" || engineering) {
@@ -378,10 +390,17 @@ export class AutomationRuntime {
 		);
 		let leaseTimer: ReturnType<typeof setTimeout> | undefined;
 		let renewing: Promise<void> | undefined;
+		let authorityFailure: AutomationDiagnostic | undefined;
 		const deadline = () => {
 			clearTimeout(leaseTimer);
 			leaseTimer = setTimeout(
-				() => controller.abort(),
+				() => {
+					authorityFailure = {
+						phase: "execute",
+						code: "authority_unavailable",
+					};
+					controller.abort();
+				},
 				Math.max(0, Date.parse(authority.leaseUntil) - Date.now()),
 			);
 		};
@@ -437,6 +456,7 @@ export class AutomationRuntime {
 						});
 			renewing = refresh()
 				.catch((error) => {
+					authorityFailure = safeDiagnostic(error, "execute");
 					controller.abort();
 					throw error;
 				})
@@ -604,6 +624,10 @@ export class AutomationRuntime {
 				);
 				if (state.status === "completed") return;
 			}
+		} catch (error) {
+			if (authorityFailure)
+				throw new AutomationDiagnosticError(authorityFailure);
+			throw error;
 		} finally {
 			controller.abort();
 			clearTimeout(leaseTimer);

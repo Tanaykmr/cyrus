@@ -459,3 +459,34 @@ sandbox or publication tool, including when the model/image is unavailable.
 The additive private ledger checkpointScope field is fail-closed for older strict
 readers. Rollback must disable new engineering dispatch and preserve the new ledger;
 do not point an older runtime at it or delete it to bypass pending receipts.
+
+
+## Safe occurrence failure diagnostics
+
+The authenticated existing `GET /api/automations/v1/status/:automationId` returns
+optional `occurrences[].lastFailure = {phase,code,httpStatus?,sections?,at}`.
+This is persisted in the same private SQLite transaction as retry/block status,
+before a checkpoint or session need exist. Attempt/fence are the occurrence's
+existing fields. Phases: `admission`, `authorize`, `execute`, `mcp`, `progress`,
+`result`. Codes: `http_denied`, `transport_failed`, `response_invalid`,
+`admission_invalid`, `identity_mismatch`, `credential_invalid`,
+`authority_unavailable`, `session_mismatch`, `mcp_initialization`,
+`mcp_authorization`, `mcp_operation`, `execution_interrupted`.
+`httpStatus` is a numeric HTTP status only. Schema rejection sections are restricted
+to `authority`, `mcp`, `sessionDelivery`, `engineering`, `response`; no untrusted
+field names, values, raw error/SQL messages, bodies, stack traces or credentials.
+Unknown execution failures receive a generic code. Polling revocation retains the
+authority diagnostic even if aborting the model produces a generic abort exception.
+
+The current failed attempt's diagnostic survives restart and exhausted retries.
+A fenced stale owner cannot replace it; successful completion clears it. Existing
+records without diagnostics remain readable, but discarded historical reasons
+cannot be reconstructed. Hosted owns authenticated tenant/customer-scoped status
+projection and UI copy; no new callback route or automatic replay is introduced.
+Missing checkpoint does not prove admission denial: the initial read-set MCP
+initialize/list authorization runs before first checkpoint creation. Correlate
+both authorize and initial MCP traces when diagnosing historical runs.
+
+Do not downgrade a ledger written with these optional fields to an older strict
+reader. Disable dispatch and preserve the ledger/receipts during rollback; never
+strip diagnostic fields by directly mutating a live ledger.

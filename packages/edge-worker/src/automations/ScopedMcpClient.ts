@@ -10,6 +10,7 @@ import {
 	permittedToolNames,
 	scopedToolResult,
 } from "./contract.js";
+import { AutomationDiagnosticError } from "./Diagnostics.js";
 import {
 	engineeringPublicationResult,
 	publicationMetadata,
@@ -104,6 +105,17 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 						AbortSignal.timeout(20_000),
 					]),
 				});
+				if (
+					!response.ok &&
+					!(response.status === 405 && init?.method === "GET")
+				) {
+					await response.body?.cancel();
+					throw new AutomationDiagnosticError({
+						phase: "mcp",
+						code: "http_denied",
+						httpStatus: response.status,
+					});
+				}
 				if (!response.body) return response;
 				// This contract uses JSON responses, not a background SSE stream. Buffer
 				// bounded bytes before handing the response to the SDK: cancelling a
@@ -149,9 +161,13 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 			this.transport = transport;
 			this.connectedCredential = credential;
 			return client;
-		} catch {
+		} catch (error) {
 			await client.close().catch(() => {});
-			throw new Error("Scoped MCP initialization denied");
+			if (error instanceof AutomationDiagnosticError) throw error;
+			throw new AutomationDiagnosticError(
+				{ phase: "mcp", code: "mcp_initialization" },
+				"Scoped MCP initialization denied",
+			);
 		}
 	}
 
@@ -184,9 +200,14 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 						timeout: 20_000,
 					}),
 				);
-			} catch {
+			} catch (error) {
 				await this.disconnect();
-				throw new Error("Scoped MCP authority unavailable");
+				throw new AutomationDiagnosticError(
+					error instanceof AutomationDiagnosticError
+						? error.diagnostic
+						: { phase: "mcp", code: "mcp_authorization" },
+					"Scoped MCP authority unavailable",
+				);
 			}
 		});
 	}
@@ -280,11 +301,16 @@ export class ScopedAutomationMcpClient implements ScopedAutomationTools {
 							this.references.add(issue.reference);
 				}
 				return output;
-			} catch {
+			} catch (error) {
 				// Uncertain operations remain checkpointed. Next admitted attempt reconnects
 				// with the same operation key; it never retries a send under broader authority.
 				await this.disconnect();
-				throw new Error("Scoped MCP operation interrupted");
+				throw new AutomationDiagnosticError(
+					error instanceof AutomationDiagnosticError
+						? error.diagnostic
+						: { phase: "mcp", code: "mcp_operation" },
+					"Scoped MCP operation interrupted",
+				);
 			}
 		});
 	}

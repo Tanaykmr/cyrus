@@ -208,7 +208,10 @@ it("lists and reads session references through SDK transport; rejects cross-sess
 		hideList = false;
 		const beforeRevocation = await list();
 		revoked = true;
-		await expect(client.revalidate()).rejects.toThrow("authority unavailable");
+		await expect(client.revalidate()).rejects.toMatchObject({
+			message: "Scoped MCP authority unavailable",
+			diagnostic: { phase: "mcp", code: "http_denied", httpStatus: 401 },
+		});
 		await expect(
 			call("get_issue", { reference: beforeRevocation[0]!.reference }),
 		).rejects.toThrow("interrupted");
