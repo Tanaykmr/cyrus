@@ -563,6 +563,14 @@ export class RunnerConfigBuilder {
 			config.writableRoots = input.sandboxWritablePaths;
 		}
 
+		// A repository can name a permission profile from its own
+		// `.codex/config.toml`; the runner selects it per thread so the repo's
+		// filesystem rules and network domain allowlist apply.
+		const codexPermissionsProfile = input.repository.codex?.permissionsProfile;
+		if (runnerType === "codex" && codexPermissionsProfile) {
+			config.permissionsProfile = codexPermissionsProfile;
+		}
+
 		// Claude with the egress sandbox: the OS sandbox side is handled in
 		// buildSandboxConfig. On the tool-permission side, treat the paths as
 		// allowed directories (Read allow + exemption from the home-directory

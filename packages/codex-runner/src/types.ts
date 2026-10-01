@@ -62,6 +62,13 @@ export interface CodexRunnerConfig extends AgentRunnerConfig {
 	 * workspace-write mode and the granular `sandboxSettings` profile.
 	 */
 	writableRoots?: string[];
+	/**
+	 * Name of a permission profile defined in the repository's
+	 * `.codex/config.toml` (e.g. `[permissions.my-profile]`). In workspace-write
+	 * mode the session runs under that profile, keeping its filesystem rules and
+	 * network domain allowlist, with Cyrus's writable roots added on top.
+	 */
+	permissionsProfile?: string;
 }
 
 /**

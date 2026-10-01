@@ -36,6 +36,12 @@ export interface SandboxResolveInput {
 	networkAccess: boolean;
 	/** When present, produces a granular `profile`; otherwise a `workspace-mode`. */
 	sandboxSettings?: CyrusSandboxFilesystem;
+	/**
+	 * Name of a permission profile defined in the repository's own
+	 * `.codex/config.toml`. In workspace-write mode it is selected for the
+	 * thread instead of the coarse mode or the generated Cyrus profile.
+	 */
+	permissionsProfile?: string;
 }
 
 function uniqueAbsolute(paths: string[]): string[] {
@@ -47,6 +53,8 @@ function uniqueAbsolute(paths: string[]): string[] {
  *
  * - Explicit read-only/full-access modes or no `sandboxSettings` use the
  *   corresponding native Codex mode.
+ * - Workspace-write with a repository `permissionsProfile` selects that
+ *   `named-profile`, layering Cyrus's writable roots on top of it.
  * - Workspace-write with `sandboxSettings` uses a granular `profile` that restricts
  *   reads to an allow-list (worktree + platform defaults + explicit reads) and
  *   writes to the worktree + explicit writable roots.
@@ -55,6 +63,19 @@ export function resolveCodexSandbox(
 	input: SandboxResolveInput,
 ): ResolvedCodexSandbox {
 	const { mode, workingDirectory, writableRoots, networkAccess } = input;
+
+	// A repository-defined profile owns filesystem and network policy (e.g. its
+	// domain allowlist). Cyrus only adds the roots a session must write to, such
+	// as the main repository's `.git` that worktree commits land in.
+	if (input.permissionsProfile && mode === "workspace-write") {
+		return {
+			kind: "named-profile",
+			profileId: input.permissionsProfile,
+			writableRoots: uniqueAbsolute(writableRoots).filter(
+				(p) => p !== workingDirectory,
+			),
+		};
+	}
 
 	// Explicit native modes take precedence over generated filesystem profiles.
 	// A root-writable profile still applies OS sandbox restrictions on macOS.

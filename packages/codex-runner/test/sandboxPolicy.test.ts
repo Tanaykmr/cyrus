@@ -21,6 +21,27 @@ describe("resolveCodexSandbox", () => {
 		});
 	});
 
+	it("uses a named permissions profile over sandbox settings, keeping extra writable roots", () => {
+		expect(
+			resolveCodexSandbox({
+				mode: "workspace-write",
+				workingDirectory: "/repo/a",
+				writableRoots: [
+					"/repo/a",
+					"/repo/.git/worktrees/a",
+					"relative/ignored",
+				],
+				networkAccess: true,
+				sandboxSettings: { allowRead: ["/repo/a"] },
+				permissionsProfile: "tp-perms",
+			}),
+		).toEqual({
+			kind: "named-profile",
+			profileId: "tp-perms",
+			writableRoots: ["/repo/.git/worktrees/a"],
+		});
+	});
+
 	it("builds a read-restricted permission profile from sandbox settings", () => {
 		expect(
 			resolveCodexSandbox({
