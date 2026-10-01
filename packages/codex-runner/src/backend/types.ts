@@ -97,6 +97,10 @@ export type CodexFileSystemAccess = "read" | "write" | "deny";
  *   `:tmpdir`, `:slash_tmp`). Sent via `thread/start.permissions` (the profile id)
  *   + `config.permissions.<id>` (the profile body); the profile persists per-thread
  *   and cannot be combined with `thread/start.sandbox`.
+ * - `named-profile`: a permission profile the user defined in their Codex config
+ *   (e.g. the repo's `.codex/config.toml`). Selected via `thread/start.permissions`;
+ *   `writableRoots` are merged into its filesystem table via `config.permissions.<id>`
+ *   so worktree git metadata and attachments stay writable.
  */
 export type ResolvedCodexSandbox =
 	| {
@@ -110,6 +114,11 @@ export type ResolvedCodexSandbox =
 			profileId: string;
 			filesystem: Record<string, CodexFileSystemAccess>;
 			networkAccess: boolean;
+	  }
+	| {
+			kind: "named-profile";
+			profileId: string;
+			writableRoots: string[];
 	  };
 
 /**

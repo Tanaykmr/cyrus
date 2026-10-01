@@ -97,6 +97,19 @@ export const OpenCodeConfigSchema = z.object({
 });
 
 /**
+ * Repository-specific Codex runner settings
+ */
+export const CodexRepositoryConfigSchema = z.object({
+	/**
+	 * Named Codex permission profile (`[permissions.<name>]` in the repo's or the
+	 * user's Codex config) to run sessions under, instead of Cyrus's default
+	 * workspace-write sandbox. Cyrus still grants write access to the session's
+	 * extra roots (attachments, the worktree's git metadata) on top of it.
+	 */
+	permissionsProfile: z.string().optional(),
+});
+
+/**
  * Tool restriction options for label-based prompts
  */
 const ToolRestrictionSchema = z.union([
@@ -358,6 +371,9 @@ export const RepositoryConfigSchema = z.object({
 
 	// Repository-specific OpenCode runtime config overrides
 	opencode: OpenCodeConfigSchema.optional(),
+
+	// Repository-specific Codex runner settings
+	codex: CodexRepositoryConfigSchema.optional(),
 });
 
 /**

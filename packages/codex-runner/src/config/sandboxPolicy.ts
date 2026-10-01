@@ -36,6 +36,8 @@ export interface SandboxResolveInput {
 	networkAccess: boolean;
 	/** When present, produces a granular `profile`; otherwise a `workspace-mode`. */
 	sandboxSettings?: CyrusSandboxFilesystem;
+	/** User-defined Codex permission profile; when set, wins over everything else. */
+	permissionsProfile?: string;
 }
 
 function uniqueAbsolute(paths: string[]): string[] {
@@ -45,6 +47,8 @@ function uniqueAbsolute(paths: string[]): string[] {
 /**
  * Resolve the per-thread sandbox decision.
  *
+ * - `permissionsProfile` set → `named-profile`: the user's own Codex profile,
+ *   plus the extra writable roots (cwd is already its `:workspace_roots`).
  * - No `sandboxSettings` → `workspace-mode` (the coarse Codex mode with broad
  *   reads — unchanged default behavior).
  * - `sandboxSettings` present → a granular permission `profile` that restricts
@@ -55,6 +59,16 @@ export function resolveCodexSandbox(
 	input: SandboxResolveInput,
 ): ResolvedCodexSandbox {
 	const { mode, workingDirectory, writableRoots, networkAccess } = input;
+
+	if (input.permissionsProfile) {
+		return {
+			kind: "named-profile",
+			profileId: input.permissionsProfile,
+			writableRoots: uniqueAbsolute(writableRoots).filter(
+				(p) => p !== workingDirectory,
+			),
+		};
+	}
 
 	if (!input.sandboxSettings) {
 		return {

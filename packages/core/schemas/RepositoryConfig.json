@@ -489,6 +489,15 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"codex": {
+			"type": "object",
+			"properties": {
+				"permissionsProfile": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
 		}
 	},
 	"required": [

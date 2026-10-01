@@ -42,7 +42,10 @@ function makeSession(): CyrusAgentSession {
 	} as unknown as CyrusAgentSession;
 }
 
-function buildCodexConfig(sandboxSettings?: Record<string, unknown>) {
+function buildCodexConfig(
+	sandboxSettings?: Record<string, unknown>,
+	codex?: { permissionsProfile?: string },
+) {
 	const { config } = makeCodexBuilder().buildIssueConfig({
 		session: makeSession(),
 		repository: {
@@ -50,6 +53,7 @@ function buildCodexConfig(sandboxSettings?: Record<string, unknown>) {
 			name: "Repo A",
 			repositoryPath: "/repos/repo-a",
 			allowedTools: [],
+			...(codex ? { codex } : {}),
 		} as unknown as RepositoryConfig,
 		sessionId: "sess-1",
 		systemPrompt: "test",
@@ -66,6 +70,7 @@ function buildCodexConfig(sandboxSettings?: Record<string, unknown>) {
 	});
 	return config as {
 		sandboxSettings?: { allowWrite?: string[]; allowRead?: string[] };
+		permissionsProfile?: string;
 	};
 }
 
@@ -82,5 +87,13 @@ describe("RunnerConfigBuilder Codex sandbox plumbing", () => {
 
 	it("leaves Codex sandbox settings unset when the egress sandbox is disabled", () => {
 		expect(buildCodexConfig(undefined).sandboxSettings).toBeUndefined();
+	});
+
+	it("passes the repository's Codex permissions profile through to the runner", () => {
+		expect(
+			buildCodexConfig(undefined, { permissionsProfile: "tp-perms" })
+				.permissionsProfile,
+		).toBe("tp-perms");
+		expect(buildCodexConfig(undefined).permissionsProfile).toBeUndefined();
 	});
 });

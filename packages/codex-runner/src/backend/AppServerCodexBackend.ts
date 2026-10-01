@@ -238,9 +238,9 @@ export class AppServerCodexBackend
 		// `sandbox` (coarse mode) and `permissions` (named profile) are mutually
 		// exclusive on thread/start; pick exactly one based on the resolved arm.
 		const sandboxParams =
-			sandbox.kind === "profile"
-				? { permissions: sandbox.profileId }
-				: { sandbox: sandbox.mode };
+			sandbox.kind === "workspace-mode"
+				? { sandbox: sandbox.mode }
+				: { permissions: sandbox.profileId };
 		return {
 			...(config.workingDirectory ? { cwd: config.workingDirectory } : {}),
 			approvalPolicy: config.approvalPolicy,
@@ -260,6 +260,9 @@ export class AppServerCodexBackend
 	 *   (only meaningful in workspace-write mode; omitted otherwise).
 	 * - `profile`: the granular permission profile body is registered under
 	 *   `permissions.<id>` and selected via the `permissions` thread param.
+	 * - `named-profile`: the profile comes from the user's Codex config; only the
+	 *   extra writable roots are added under `permissions.<id>.filesystem`, which
+	 *   Codex deep-merges into the user's definition.
 	 * MCP servers etc. ride along in configOverrides.
 	 */
 	private buildThreadConfig(config: ResolvedCodexConfig): CodexConfigOverrides {
@@ -275,6 +278,16 @@ export class AppServerCodexBackend
 					network: { enabled: sandbox.networkAccess },
 				},
 			};
+		} else if (sandbox.kind === "named-profile") {
+			if (sandbox.writableRoots.length > 0) {
+				base.permissions = {
+					[sandbox.profileId]: {
+						filesystem: Object.fromEntries(
+							sandbox.writableRoots.map((p) => [p, "write"]),
+						),
+					},
+				};
+			}
 		} else if (sandbox.mode === "workspace-write") {
 			base.sandbox_workspace_write = {
 				network_access: sandbox.networkAccess,

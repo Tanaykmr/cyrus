@@ -45,6 +45,7 @@ export class CodexConfigBuilder {
 				writableRoots: this.getAdditionalDirectories(),
 				networkAccess: this.resolveNetworkAccess(),
 				sandboxSettings: this.config.sandboxSettings,
+				permissionsProfile: this.config.permissionsProfile,
 			}),
 			workingDirectory: this.config.workingDirectory,
 			approvalPolicy: this.config.askForApproval || "never",

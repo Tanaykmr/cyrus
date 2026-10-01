@@ -209,6 +209,55 @@ describe("AppServerCodexBackend", () => {
 		});
 	});
 
+	it("selects a user-defined named profile and only adds Cyrus's writable roots to it", async () => {
+		const { backend, client } = makeBackend();
+		await backend.open({
+			...baseConfig,
+			codexPath: "/bin/true",
+			sandbox: {
+				kind: "named-profile",
+				profileId: "tp-perms",
+				writableRoots: ["/repo/.git/worktrees/a", "/attachments"],
+			},
+		});
+		const params = client.lastRequest("thread/start")?.params as {
+			sandbox?: string;
+			permissions?: string;
+			config?: Record<string, unknown>;
+		};
+		expect(params.permissions).toBe("tp-perms");
+		expect(params.sandbox).toBeUndefined();
+		expect(params.config?.sandbox_workspace_write).toBeUndefined();
+		// No network key: the user's profile owns network policy.
+		expect(params.config?.permissions).toEqual({
+			"tp-perms": {
+				filesystem: {
+					"/repo/.git/worktrees/a": "write",
+					"/attachments": "write",
+				},
+			},
+		});
+	});
+
+	it("leaves a named profile untouched when there are no extra writable roots", async () => {
+		const { backend, client } = makeBackend();
+		await backend.open({
+			...baseConfig,
+			codexPath: "/bin/true",
+			sandbox: {
+				kind: "named-profile",
+				profileId: "tp-perms",
+				writableRoots: [],
+			},
+		});
+		const params = client.lastRequest("thread/start")?.params as {
+			permissions?: string;
+			config?: Record<string, unknown>;
+		};
+		expect(params.permissions).toBe("tp-perms");
+		expect(params.config?.permissions).toBeUndefined();
+	});
+
 	it("does not send a sandboxPolicy on turn/start (per-thread sandbox is set at thread/start)", async () => {
 		const { backend, client } = makeBackend();
 		await backend.open({ ...baseConfig, codexPath: "/bin/true" });

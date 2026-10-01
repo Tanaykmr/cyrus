@@ -56,6 +56,11 @@ export interface CodexRunnerConfig extends AgentRunnerConfig {
 	 * coarse default mode. Paths must be absolute.
 	 */
 	sandboxSettings?: CyrusSandboxFilesystem;
+	/**
+	 * Named Codex permission profile to run under (defined in the repo's or the
+	 * user's Codex config). Takes precedence over `sandbox` and `sandboxSettings`.
+	 */
+	permissionsProfile?: string;
 }
 
 /**

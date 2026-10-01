@@ -550,6 +550,11 @@ export class RunnerConfigBuilder {
 			};
 		}
 
+		// A repo-chosen Codex permission profile replaces Cyrus's sandbox choice.
+		if (runnerType === "codex" && input.repository.codex?.permissionsProfile) {
+			config.permissionsProfile = input.repository.codex.permissionsProfile;
+		}
+
 		if (input.resumeSessionId) {
 			config.resumeSessionId = input.resumeSessionId;
 		}
