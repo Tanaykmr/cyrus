@@ -1012,6 +1012,12 @@
 				"systemWideCert": {
 					"type": "boolean"
 				},
+				"writablePaths": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
 				"logRequests": {
 					"type": "boolean"
 				}

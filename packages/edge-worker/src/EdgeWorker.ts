@@ -189,6 +189,7 @@ import {
 	SkillsPluginResolver,
 } from "./SkillsPluginResolver.js";
 import { SlackChatAdapter } from "./SlackChatAdapter.js";
+import { resolveSandboxWritablePaths } from "./sandboxWritablePaths.js";
 import type { IActivitySink } from "./sinks/IActivitySink.js";
 import { LinearActivitySink } from "./sinks/LinearActivitySink.js";
 import { ToolPermissionResolver } from "./ToolPermissionResolver.js";
@@ -6932,6 +6933,9 @@ ${input.userComment}
 			skills: allowedSkillNames,
 			sandboxSettings: this.sdkSandboxSettings ?? undefined,
 			egressCaCertPath: this.egressCaCertPath ?? undefined,
+			sandboxWritablePaths: resolveSandboxWritablePaths(
+				this.config.sandbox?.writablePaths,
+			),
 			onMessage: (message: SDKMessage) => {
 				this.handleClaudeMessage(sessionId, message, repository.id);
 			},
