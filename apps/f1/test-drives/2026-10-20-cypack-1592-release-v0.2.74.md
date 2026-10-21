@@ -73,4 +73,20 @@ The earlier Linux fixture attempts did not pass: initial attempts used obsolete 
 
 ## Result
 
+### Post-merge security refresh ([#1550](https://github.com/cyrusagents/cyrus/pull/1550))
+
+The first main-branch dry run ([39491213671](https://github.com/cyrusagents/cyrus/actions/runs/39491213671)) stopped at audit before any publication. The registry reported three additional advisories affecting MCP SDK 1.31.0 and Vite 8.0.16.
+
+Updated both direct MCP SDK owners to 1.32.1, Vitest and its companion packages to 4.1.12, and explicitly supplied Vite 8.3.4 as the CLI test runner's peer dependency. The existing OpenTelemetry security override now remains within 2.x; unconstrained resolution selected an incompatible 3.x peer. No security exclusions or new overrides were added.
+
+Validation after the refresh:
+
+- Frozen install with strict peers, zero-advisory audit, build, typecheck and lint passed (14 existing lint warnings).
+- 1,918 package tests passed (two skipped) and all 162 CLI tests passed; CLI subprocess checks used the same 30-second local timeout as above.
+- Three new real-HTTP tests exercise the production MCP connection-test handler: direct discovery succeeds, same-origin 307 discovery succeeds, and a cross-origin 307 fails without any request reaching the destination carrying custom credentials or an initialization body.
+- Re-ran `bun apps/f1/inbox-publication-drive.mjs` against the rebuilt runtime and updated MCP SDK: authenticated catalog discovery, two stable publications, queued receipts and unauthenticated 401 all passed. The receiver remains a local fixture.
+- The product does not configure experimental `taskStore`; session-task isolation is an upstream SDK fix, not a separately claimed Cyrus workflow.
+
+Earlier issue/session and OS sandbox evidence is preserved above. The new runtime dependency behavior is covered by the refreshed MCP transport drive and connection-handler checks; test-tooling changes are covered by the full suites.
+
 The changed Codex issue/session/model/configuration path and actual writable-root enforcement passed across the local F1 and isolated OS boundary checks. Inbox runtime transport and focused authentication/configuration regressions passed. Live Claude sandbox execution and real hosted inbox receiver acceptance remain outside the evidence claimed here. Release publication is gated separately by the main-only trusted workflow's package, audit, test, type, build, tarball and isolated-install checks.
