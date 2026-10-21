@@ -5684,7 +5684,10 @@ ${taskSection}`;
 			case "gemini":
 				return new GeminiRunner(config);
 			case "codex":
-				return new CodexRunner(config);
+				return new CodexRunner({
+					...config,
+					sandbox: this.config.codexSandboxMode ?? "workspace-write",
+				});
 			case "cursor":
 				return new CursorRunner(config);
 			case "opencode":
