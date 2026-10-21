@@ -90,3 +90,27 @@ Validation after the refresh:
 Earlier issue/session and OS sandbox evidence is preserved above. The new runtime dependency behavior is covered by the refreshed MCP transport drive and connection-handler checks; test-tooling changes are covered by the full suites.
 
 The changed Codex issue/session/model/configuration path and actual writable-root enforcement passed across the local F1 and isolated OS boundary checks. Inbox runtime transport and focused authentication/configuration regressions passed. Live Claude sandbox execution and real hosted inbox receiver acceptance remain outside the evidence claimed here. Release publication is gated separately by the main-only trusted workflow's package, audit, test, type, build, tarball and isolated-install checks.
+
+
+## Final merged payload assessment (2026-10-21)
+
+Main advanced to `b71e70f0f5b17fc0d8770ebcd3747e782c4d3023` after the
+security follow-up merged. The only additional commit is [#1521](https://github.com/cyrusagents/cyrus/pull/1521),
+which adds operator-selectable Codex sandbox modes. Its entries are included in
+both v0.2.74 changelogs; the coordinated package version remains unchanged.
+
+This is an F1-covered runtime change. Reviewed its committed
+[Codex sandbox-mode F1 report](2026-10-02-codex-sandbox-mode.md): isolated issue
+sessions verified default host-write denial, explicit full-access host writes
+and native Chromium execution, read-only worktree-write denial, and removal of
+the setting restoring default workspace writes with host-write denial. Config
+reload, routing, timestamped activities, final responses and session cleanup were
+observed. The report also records 77 focused tests covering schema, cold-start
+forwarding, reload/removal, runner selection and policy/backend serialization.
+
+That existing feature evidence is carried forward, not represented as a new
+release-time F1 run. Egress-enabled execution and a separate chat-session drive
+remain outside its demonstrated coverage. Workspace-write profile generation is
+unchanged by the merged feature, preserving the earlier release sandbox evidence.
+The main-only release workflow revalidates the combined package graph before any
+publication; its result is tracked in GitHub Actions.

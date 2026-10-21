@@ -4,12 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.74] - 2026-10-21
+
 ### Added
 - Added the operator-configurable `codexSandboxMode` for issue and chat sessions, retaining `workspace-write` by default and supporting opt-in native read-only or full host access without browser-specific integrations. ([#1521](https://github.com/cyrusagents/cyrus/pull/1521))
-
-## [0.2.74] - 2026-10-20
-
-### Added
 - Codex sessions, and Claude sessions with the sandbox enabled, can now write to extra whitelisted paths (e.g. `~/.supabase`) while staying sandboxed — list them in `sandbox.writablePaths` in `config.json` and/or the `CYRUS_SANDBOX_WRITABLE_PATHS` env var. ([CYPACK-1591](https://linear.app/ceedar/issue/CYPACK-1591/need-to-enable-whitelisted-sandbox-paths-for-codex-harness), [#1547](https://github.com/cyrusagents/cyrus/pull/1547))
 - Add the explicit-destination `post_message_to_codex` tool and reusable Cyrus Inbox plugin for authorized dot/Cloud Work subscriptions, with stable message keys and honest queue receipts. ([CYHOST-1356](https://linear.app/ceedar/issue/CYHOST-1356), [#1535](https://github.com/cyrusagents/cyrus/pull/1535))
 
