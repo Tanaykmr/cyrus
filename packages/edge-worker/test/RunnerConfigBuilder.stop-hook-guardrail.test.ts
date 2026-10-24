@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	buildStopHook,
 	inspectGitGuardrail,
+	MAX_UNPUSHED_STOP_BLOCKS,
 } from "../src/RunnerConfigBuilder.js";
 
 const silentLogger: ILogger = {
@@ -152,6 +153,72 @@ describe("buildStopHook", () => {
 		);
 
 		expect(result).toEqual({});
+	});
+
+	describe("with commits ahead of the upstream", () => {
+		let remote: string;
+
+		beforeEach(() => {
+			remote = mkdtempSync(join(tmpdir(), "cyrus-stop-hook-remote-"));
+			execSync(`git init --bare`, { cwd: remote, stdio: "ignore" });
+			git(workdir, "init -b main");
+			git(workdir, `remote add origin ${remote}`);
+			writeFileSync(join(workdir, "README.md"), "hello\n");
+			git(workdir, "add README.md");
+			git(workdir, 'commit -m "init"');
+			git(workdir, "push -u origin main");
+			writeFileSync(join(workdir, "feature.txt"), "feature\n");
+			git(workdir, "add feature.txt");
+			git(workdir, 'commit -m "feature"');
+		});
+
+		afterEach(() => {
+			rmSync(remote, { recursive: true, force: true });
+		});
+
+		const stop = (
+			callback: ReturnType<typeof getStopHookCallback>,
+			cwd: string,
+			stopHookActive: boolean,
+		) =>
+			callback(
+				makeStopInput({ cwd, stop_hook_active: stopHookActive }),
+				"tool-use-id",
+				{ signal: new AbortController().signal },
+			) as Promise<{ decision?: string; reason?: string }>;
+
+		it("keeps blocking repeat stops until the push lands", async () => {
+			const callback = getStopHookCallback();
+
+			expect((await stop(callback, workdir, false)).decision).toBe("block");
+			const repeat = await stop(callback, workdir, true);
+			expect(repeat.decision).toBe("block");
+			expect(repeat.reason).toContain("1 commit not on the remote");
+
+			git(workdir, "push");
+			expect(await stop(callback, workdir, true)).toEqual({});
+		});
+
+		it("allows the stop after the repeat-block cap", async () => {
+			const callback = getStopHookCallback();
+
+			await stop(callback, workdir, false);
+			for (let i = 0; i < MAX_UNPUSHED_STOP_BLOCKS; i++) {
+				expect((await stop(callback, workdir, true)).decision).toBe("block");
+			}
+			expect(await stop(callback, workdir, true)).toEqual({});
+
+			// A fresh stop attempt resets the cap.
+			await stop(callback, workdir, false);
+			expect((await stop(callback, workdir, true)).decision).toBe("block");
+		});
+
+		it("does not repeat-block a branch with no upstream", async () => {
+			git(workdir, "checkout -q -b local-only");
+			const callback = getStopHookCallback();
+
+			expect(await stop(callback, workdir, true)).toEqual({});
+		});
 	});
 });
 

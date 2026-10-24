@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 - A repository's `appendInstruction` can use `{{base_branch}}`, which resolves to the session's base branch (including `[repo=name#branch]` overrides), so repository instructions no longer have to hardcode a branch that an issue may override.
 - Added the operator-configurable `codexSandboxMode` for issue and chat sessions, retaining `workspace-write` by default and supporting opt-in native read-only or full host access without browser-specific integrations. ([#1521](https://github.com/cyrusagents/cyrus/pull/1521))
 
+### Fixed
+- Sessions can no longer end with a fix commit that never reached the remote. When a branch has commits its upstream doesn't, ending the session is blocked every time (up to 5 repeats) until the push lands, instead of only once. Previously a push run in the background could be killed when the session ended, leaving the PR without the fix.
+- GitHub webhooks sent from GitHub's newer IP ranges are no longer rejected as unauthorized, so `@` mentions on PRs reliably start a session.
+
 ## [0.2.74] - 2026-10-20
 
 ### Added

@@ -761,6 +761,9 @@ export class RunnerConfigBuilder {
 export function buildStopHook(
 	log: ILogger,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+	// Repeat blocks per session for commits that never reached the upstream.
+	const unpushedBlocks = new Map<string, number>();
+
 	return {
 		Stop: [
 			{
@@ -769,10 +772,32 @@ export function buildStopHook(
 					async (input) => {
 						const stopInput = input as StopHookInput;
 
-						// Prevent infinite loops: if the hook already fired, allow the stop.
+						// The hook already fired once. Uncommitted changes may be
+						// intentional, but commits ahead of the upstream mean a push never
+						// landed (e.g. a backgrounded push killed when the session ended),
+						// so keep blocking on those, up to a cap so an impossible push
+						// cannot loop forever.
 						if (stopInput.stop_hook_active) {
-							return {};
+							const ahead = countCommitsAheadOfUpstream(stopInput.cwd);
+							if (!ahead) {
+								return {};
+							}
+							const blocks = unpushedBlocks.get(stopInput.session_id) ?? 0;
+							if (blocks >= MAX_UNPUSHED_STOP_BLOCKS) {
+								log.warn(
+									`PR guardrail: allowing stop with ${ahead} unpushed commit(s) after ${blocks} repeat blocks`,
+								);
+								return {};
+							}
+							unpushedBlocks.set(stopInput.session_id, blocks + 1);
+							return {
+								decision: "block",
+								reason: buildUnpushedReminder(ahead),
+							};
 						}
+
+						// A fresh stop attempt starts a new chain of repeat blocks.
+						unpushedBlocks.delete(stopInput.session_id);
 
 						const guardrail = inspectGitGuardrail(stopInput.cwd, log);
 						if (!guardrail) {
@@ -788,6 +813,36 @@ export function buildStopHook(
 			},
 		],
 	};
+}
+
+/** Cap on repeat Stop blocks per session for commits ahead of the upstream. */
+export const MAX_UNPUSHED_STOP_BLOCKS = 5;
+
+/**
+ * Count commits on HEAD that are not on its configured upstream. Returns 0
+ * when there is no upstream or git fails, so only a branch that tracks a
+ * remote and is genuinely ahead of it counts as an unfinished push.
+ */
+export function countCommitsAheadOfUpstream(cwd: string): number {
+	try {
+		const out = execSync("git rev-list --count @{u}..HEAD", {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		return parseInt(out, 10) || 0;
+	} catch {
+		return 0;
+	}
+}
+
+function buildUnpushedReminder(ahead: number): string {
+	return (
+		`The branch still has ${ahead} commit${ahead === 1 ? "" : "s"} not on the remote, so the push has not landed. ` +
+		"This check blocks every stop until it does. Run the push in the foreground " +
+		"(not in the background) and wait for it to finish, because background tasks " +
+		"are killed when the session ends. If a pre-push hook fails, fix the failure and push again."
+	);
 }
 
 /**
@@ -865,6 +920,7 @@ export function inspectGitGuardrail(cwd: string, log: ILogger): string | null {
 		"1. Commit any uncommitted changes with a descriptive message.\n" +
 		"2. Push the branch to the remote.\n" +
 		"3. Create or update a pull request that summarizes the change.\n\n" +
-		"If the work is genuinely complete and a PR is not appropriate (for example, a question or research task with no intended code changes), you may stop again — this guardrail only blocks once per session."
+		"Run the push in the foreground, not in the background: background tasks are killed when the session ends.\n\n" +
+		"If the work is genuinely complete and a PR is not appropriate (for example, a question or research task with no intended code changes), you may stop again. Uncommitted changes only block once, but commits not yet on the branch's upstream keep blocking until they are pushed."
 	);
 }
