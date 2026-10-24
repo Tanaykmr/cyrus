@@ -755,18 +755,20 @@ export class EdgeWorker extends EventEmitter {
 			);
 		}
 
-		// Initialize and register components BEFORE starting server (routes must be registered before listen())
-		await this.initializeComponents();
-
-		// Refresh GitHub webhook allowlist from /meta API (non-blocking)
+		// Refresh GitHub webhook allowlist from /meta API before the transports are
+		// built: they capture the allowlist array at construction, so a refresh that
+		// lands afterwards would never reach them. Bounded by the fetch timeout.
 		if (this.webhookIpValidator.isEnabled()) {
-			this.webhookIpValidator.refreshGitHubAllowlist().catch((error) => {
+			await this.webhookIpValidator.refreshGitHubAllowlist().catch((error) => {
 				this.logger.warn(
 					"Failed to refresh GitHub webhook allowlist",
 					error instanceof Error ? error : new Error(String(error)),
 				);
 			});
 		}
+
+		// Initialize and register components BEFORE starting server (routes must be registered before listen())
+		await this.initializeComponents();
 
 		// Start shared application server (this also starts Cloudflare tunnel if CLOUDFLARE_TOKEN is set)
 		await this.sharedApplicationServer.start();

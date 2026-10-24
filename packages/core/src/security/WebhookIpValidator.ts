@@ -34,10 +34,13 @@ export const LINEAR_WEBHOOK_IPS = [
 ] as const;
 
 /**
- * Fallback GitHub webhook CIDRs (from /meta API as of 2025).
+ * Fallback GitHub webhook CIDRs (from /meta API as of 2026-10-24).
  * These are used when the /meta API is unavailable.
  */
 export const GITHUB_WEBHOOK_CIDRS_FALLBACK = [
+	"9.234.106.48/28",
+	"9.234.98.160/28",
+	"9.234.98.176/28",
 	"192.30.252.0/22",
 	"185.199.108.0/22",
 	"140.82.112.0/20",
