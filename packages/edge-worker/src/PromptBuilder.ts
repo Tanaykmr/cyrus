@@ -955,13 +955,19 @@ IMPORTANT: Focus specifically on addressing the new comment above. This is a new
 				prompt = `${prompt}\n\n${attachmentManifest}`;
 			}
 
-			// Append repository-specific instructions from all repos
+			// Append repository-specific instructions from all repos. `{{base_branch}}`
+			// resolves per repo, so an instruction can follow a `[repo=name#branch]`
+			// override instead of hardcoding the default branch.
 			for (const repo of repositories) {
 				if (repo.appendInstruction) {
 					this.logger.debug(
 						`Adding repository-specific instruction for ${repo.name}`,
 					);
-					prompt = `${prompt}\n\n<repository-specific-instruction repository="${repo.name}">\n${repo.appendInstruction}\n</repository-specific-instruction>`;
+					const instruction = repo.appendInstruction.replace(
+						/{{base_branch}}/g,
+						baseBranchMap.get(repo.id) ?? repo.baseBranch,
+					);
+					prompt = `${prompt}\n\n<repository-specific-instruction repository="${repo.name}">\n${instruction}\n</repository-specific-instruction>`;
 				}
 			}
 

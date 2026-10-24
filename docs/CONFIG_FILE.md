@@ -50,6 +50,16 @@ Expected file format:
 
 Learn more about MCP: https://code.claude.com/docs/en/mcp
 
+### `appendInstruction` (string)
+
+Extra instructions appended to every issue prompt for this repository. `{{base_branch}}` is replaced with the base branch resolved for the session: the `[repo=name#branch]` override, a Graphite or parent-issue branch, or else the repository's `baseBranch`. Use it instead of hardcoding a branch, so the instruction stays correct when an issue targets a different branch:
+
+```json
+{
+  "appendInstruction": "Always open PRs with `gh pr create --base {{base_branch}}`."
+}
+```
+
 ### `opencode` (object)
 
 OpenCode sessions run with Cyrus-managed inline runtime config for generated MCP servers and permission rules. By default, Cyrus otherwise inherits the parent process environment for CLI config, state, and cache paths, matching the behavior of other agent providers and allowing tools such as `gh` and `glab` to use your normal terminal authentication. You can opt into dedicated Cyrus-managed OpenCode state globally or per repository with `opencode.stateScope`.
